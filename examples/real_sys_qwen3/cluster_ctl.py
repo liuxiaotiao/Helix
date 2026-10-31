@@ -14,6 +14,7 @@ Run from this directory, ideally inside tmux/screen (profiling takes a while).
   python cluster_ctl.py push-plan [--bundle plan.tgz]        # plan files -> every node
   python cluster_ctl.py net-test --layout ilp  # real host + fake (no-GPU) workers: network/routing test
   python cluster_ctl.py disk [--quick]         # what uses disk space on each node, what could be cleaned
+  python cluster_ctl.py gpus                   # GPU memory in use + the processes holding it
   python cluster_ctl.py start-workers maxflow  # step3_start_worker.py on every worker (background)
   python cluster_ctl.py stop-workers
 
@@ -174,22 +175,36 @@ def cmd_install(c, rm, only, every, flags):
 
 
 # ------------------------------------------------------------------------------------------- #
-def gpu_info(rm, w):
-    """(gpu name, total memory GB) of the worker's GPU, or raises RuntimeError."""
+GPU_BUSY_GB = 1.0      # memory already used on a GPU above which we call it busy
+
+
+def gpu_info(rm, w, with_used=False):
+    """(gpu name, total memory GB[, used GB]) of the worker's GPU, or raises RuntimeError."""
     idx = int(w.get("gpu", 0))
-    r = rm.run(w["ip"], f"nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits "
+    r = rm.run(w["ip"], f"nvidia-smi --query-gpu=name,memory.total,memory.used --format=csv,noheader,nounits "
                         f"-i {idx}", setup=False, timeout=60)
     if r.returncode != 0:
         raise RuntimeError((r.stderr or r.stdout).strip().splitlines()[-1:] or "nvidia-smi failed")
-    name, mem_mib = [x.strip() for x in r.stdout.strip().splitlines()[0].split(",")]
-    return name, float(mem_mib) * 1024 ** 2 / 1e9
+    name, mem_mib, used_mib = [x.strip() for x in r.stdout.strip().splitlines()[0].split(",")]
+    total, used = float(mem_mib) * 1024 ** 2 / 1e9, float(used_mib) * 1024 ** 2 / 1e9
+    return (name, total, used) if with_used else (name, total)
+
+
+def gpu_processes(rm, ip):
+    """'pid name MiB' lines of the processes using GPU memory on that node."""
+    r = rm.run(ip, "nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv,noheader,nounits",
+               setup=False, timeout=60)
+    return [" ".join(x.strip() for x in line.split(",")) + " MiB" for line in r.stdout.strip().splitlines() if line.strip()]
 
 
 def check_worker(rm, w, nominal):
     """Returns a list of (level, message)."""
     out = []
     try:
-        name, gb = gpu_info(rm, w)
+        name, gb, used = gpu_info(rm, w, with_used=True)
+        if used > GPU_BUSY_GB:
+            out.append(("WARN", f"GPU busy: {used:.1f} of {gb:.0f} GB already used by other processes "
+                                f"({'; '.join(gpu_processes(rm, w['ip']))[:120]}). Helix needs the GPU free."))
         exp = nominal.get(w["type"])
         if exp is None:
             out.append(("WARN", f"GPU {name} {gb:.0f} GB; type '{w['type']}' has no nominal VRAM "
@@ -270,7 +285,7 @@ def cmd_profile(c, rm, types, force, extra, fetch):
         if (types and t not in types) or t in chosen:
             continue
         try:
-            name, gb = gpu_info(rm, w)
+            name, gb, used = gpu_info(rm, w, with_used=True)
         except Exception as e:  # noqa: BLE001
             print(f"[skip] {w['ip']} ({t}): {e}")
             continue
@@ -278,11 +293,15 @@ def cmd_profile(c, rm, types, force, extra, fetch):
         if exp is not None and not 0.85 <= gb / exp <= 1.15 and not force:
             print(f"[skip] {w['ip']}: {name} {gb:.0f} GB does not look like '{t}' ({exp} GB)")
             continue
+        if used > GPU_BUSY_GB:
+            # measuring on a busy GPU gives wrong timings and a too small KV capacity
+            print(f"[skip] {w['ip']} ({t}): GPU busy, {used:.1f} GB used by other processes")
+            continue
         chosen[t] = w
         print(f"[pick] {t:9s} -> {w['ip']} ({name}, {gb:.0f} GB)")
     missing = sorted(set(types or {w["type"] for w in c["workers"]}) - set(chosen))
     if missing:
-        raise SystemExit(f"no usable worker for type(s) {missing}")
+        raise SystemExit(f"no usable (free) worker for type(s) {missing}; see `python cluster_ctl.py gpus`")
 
     procs = {}
     for t, w in chosen.items():
@@ -446,7 +465,17 @@ def cmd_bandwidth(c, rm, pairs, port, seconds, write):
 
 
 # ------------------------------------------------------------------------------------------- #
-def cmd_start_workers(c, rm, method):
+def cmd_start_workers(c, rm, method, force=False):
+    busy = []
+    for w in c["workers"]:
+        try:
+            if gpu_info(rm, w, with_used=True)[2] > GPU_BUSY_GB:
+                busy.append(w["ip"])
+        except Exception:  # noqa: BLE001
+            pass
+    if busy and not force:
+        raise SystemExit(f"GPUs busy (other processes hold memory) on {busy}; the workers would fail or be "
+                         f"slow. Free them (see `python cluster_ctl.py gpus`) or pass --force.")
     d = os.path.join(rm.repo, "examples", "real_sys_qwen3")
     for w in c["workers"]:
         log = f"logs/worker_{w['ip']}.log"
@@ -540,6 +569,22 @@ def cmd_disk(c, rm, only, quick):
     print(f"\n每台的完整报告（含具体路径和清理命令）: {os.path.relpath(LOG_DIR, HERE)}/disk_<ip>.txt")
 
 
+def cmd_gpus(c, rm):
+    print(f"{'node':15s} {'type':9s} {'GPU':22s} {'used / total':>14s}  processes")
+    free = 0
+    for w in c["workers"]:
+        try:
+            name, total, used = gpu_info(rm, w, with_used=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"{w['ip']:15s} {w['type']:9s} ERROR: {e}")
+            continue
+        procs = gpu_processes(rm, w["ip"]) if used > GPU_BUSY_GB else []
+        free += used <= GPU_BUSY_GB
+        print(f"{w['ip']:15s} {w['type']:9s} {name[:22]:22s} {used:5.1f} / {total:4.0f} GB  "
+              f"{'free' if not procs else '; '.join(procs)}")
+    print(f"\n{free} of {len(c['workers'])} GPUs free. Helix (test_gpu_stage, profile, workers) needs them free.")
+
+
 def cmd_stop_workers(c, rm):
     for w in c["workers"]:
         # "[s]tep3": matches the workers but not the shell that runs this very command line
@@ -585,6 +630,8 @@ def main():
     b.add_argument("--write", action="store_true", help="store the median in cluster.json")
     s = sub.add_parser("start-workers")
     s.add_argument("method", choices=["maxflow", "swarm", "random"])
+    s.add_argument("--force", action="store_true", help="start even if some GPUs are busy")
+    sub.add_parser("gpus", help="GPU memory in use and the processes holding it, on every node")
     sub.add_parser("stop-workers")
     dk = sub.add_parser("disk", help="what uses disk space on each node and what could be cleaned (read-only)")
     dk.add_argument("--nodes", nargs="*")
@@ -615,7 +662,9 @@ def main():
     elif a.cmd == "bandwidth":
         cmd_bandwidth(c, rm, a.pairs, a.port, a.seconds, a.write)
     elif a.cmd == "start-workers":
-        cmd_start_workers(c, rm, a.method)
+        cmd_start_workers(c, rm, a.method, a.force)
+    elif a.cmd == "gpus":
+        cmd_gpus(c, rm)
     elif a.cmd == "disk":
         cmd_disk(c, rm, a.nodes, a.quick)
     elif a.cmd == "net-test":
