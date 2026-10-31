@@ -47,6 +47,74 @@ from vllm.model_executor.parallel_utils.parallel_state import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import SamplerOutput
 
+import importlib
+import os
+
+# --------------------------------------------------------------------------------------------- #
+# moe_align_block_size on GPUs with little shared memory (Turing: T4, Quadro RTX 6000, ...)
+#
+# vLLM 0.4.0's CUDA kernel puts a ((E + 1) * E + E + 1) int32 table in shared memory and raises
+# "CUDA error: invalid argument" when that exceeds the GPU's per-block limit. With Qwen3-MoE's
+# E = 128 experts it needs 66,564 B; Turing (sm_75) allows 65,536 B (Ampere: up to 163 KB).
+# On such GPUs we use an equivalent PyTorch implementation that produces the same
+# (sorted_token_ids, expert_ids, num_tokens_post_padded) as the kernel, so fused_moe's Triton
+# kernel sees identical inputs. Override: HELIX_MOE_ALIGN=torch | cuda | auto (default).
+# --------------------------------------------------------------------------------------------- #
+_MAX_SHARED_MEM_PER_BLOCK = {   # opt-in dynamic shared memory per block, bytes (CUDA docs)
+    (7, 0): 98304, (7, 2): 98304, (7, 5): 65536,
+    (8, 0): 166912, (8, 6): 101376, (8, 7): 166912, (8, 9): 101376, (9, 0): 232448,
+}
+_fused_moe_module = importlib.import_module("vllm.model_executor.layers.fused_moe.fused_moe")
+_cuda_moe_align_block_size = _fused_moe_module.moe_align_block_size
+_use_torch_align_cache: Dict[Any, bool] = {}
+
+
+def moe_align_block_size_torch(topk_ids: torch.Tensor, block_size: int, num_experts: int):
+    """PyTorch equivalent of vLLM 0.4.0's moe_align_block_size (same outputs, same layout):
+    tokens of each expert, in ascending flattened order, padded to a multiple of block_size with
+    the sentinel numel; expert_ids[b] = expert of block b; num_tokens_post_padded = total."""
+    flat = topk_ids.flatten().long()
+    numel, dev = flat.numel(), flat.device
+    sorted_ids = torch.full((numel + num_experts * (block_size - 1),), numel, dtype=torch.int32,
+                            device=dev)
+    expert_ids = torch.zeros((numel + num_experts,), dtype=torch.int32, device=dev)
+    counts = torch.bincount(flat, minlength=num_experts)
+    padded = (counts + block_size - 1) // block_size * block_size
+    pad_start = torch.cumsum(padded, 0) - padded          # where each expert's segment starts
+    order = torch.sort(flat, stable=True).indices          # token slots grouped by expert
+    sorted_exp = flat[order]
+    rank = torch.arange(numel, device=dev) - (torch.cumsum(counts, 0) - counts)[sorted_exp]
+    sorted_ids[pad_start[sorted_exp] + rank] = order.to(torch.int32)
+    blocks = torch.repeat_interleave(torch.arange(num_experts, dtype=torch.int32, device=dev),
+                                     padded // block_size)
+    expert_ids[:blocks.numel()] = blocks
+    num_tokens_post_pad = padded.sum().to(torch.int32).view(1)
+    return sorted_ids, expert_ids, num_tokens_post_pad
+
+
+def _use_torch_align(device: torch.device, num_experts: int) -> bool:
+    mode = os.environ.get("HELIX_MOE_ALIGN", "auto").lower()
+    if mode in ("torch", "cuda"):
+        return mode == "torch"
+    if device.type != "cuda":
+        return True
+    key = (device.index, num_experts)
+    if key not in _use_torch_align_cache:
+        cap = torch.cuda.get_device_capability(device)
+        need = ((num_experts + 1) * num_experts + (num_experts + 1)) * 4
+        _use_torch_align_cache[key] = need > _MAX_SHARED_MEM_PER_BLOCK.get(cap, 49152)
+    return _use_torch_align_cache[key]
+
+
+def _moe_align_block_size_dispatch(topk_ids: torch.Tensor, block_size: int, num_experts: int):
+    if _use_torch_align(topk_ids.device, num_experts):
+        return moe_align_block_size_torch(topk_ids, block_size, num_experts)
+    return _cuda_moe_align_block_size(topk_ids, block_size, num_experts)
+
+
+# fused_moe() looks the helper up in its own module at call time
+_fused_moe_module.moe_align_block_size = _moe_align_block_size_dispatch
+
 
 def _head_dim(config: PretrainedConfig) -> int:
     head_dim = getattr(config, "head_dim", None)
