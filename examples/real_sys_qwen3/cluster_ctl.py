@@ -297,6 +297,8 @@ def cmd_profile(c, rm, types, force, extra, fetch):
             if p.returncode != 0:
                 failed.append(t)
                 print(f"[FAIL] {t} on {w['ip']} exit {p.returncode}, see {log}")
+                for line in open(log, errors="replace").read().strip().splitlines()[-8:]:
+                    print(f"         | {line}")
                 continue
             data = fetch_profile(rm, w["ip"], t)
             if data is None:

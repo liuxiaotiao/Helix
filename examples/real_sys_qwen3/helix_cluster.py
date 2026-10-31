@@ -147,8 +147,10 @@ def parse_hosts_txt(path):
 def cmd_from_hosts(path, out, host_ip, host_node, env, venv, bandwidth, host_only=False):
     nodes = parse_hosts_txt(path)
     if host_node:
-        match = [n for n in nodes if n[0] == host_node]
-        assert match, f"--host-node {host_node} not in {path}"
+        match = [n for n in nodes if host_node in (n[0], n[1])]        # node name or its IP
+        assert match, (f"--host-node {host_node} not in {path} (use a node name such as "
+                       f"{nodes[0][0]} or one of its IPs such as {nodes[0][1]})")
+        host_node = match[0][0]
         host_ip = match[0][1]
         if host_only:
             nodes = [n for n in nodes if n[0] != host_node]
@@ -156,6 +158,13 @@ def cmd_from_hosts(path, out, host_ip, host_node, env, venv, bandwidth, host_onl
         else:
             print(f"host = {host_node} ({host_ip}), which also stays a worker")
     assert host_ip, "give --host-ip <coordinator IP> or --host-node <a node from hosts.txt>"
+    # the shell on THIS machine expands ~/x before we see it (/Users/me/x on a Mac): the venv path
+    # is meant for the cluster nodes, so turn a path under this machine's home back into ~/x
+    home = os.path.expanduser("~")
+    if venv and (venv == home or venv.startswith(home + os.sep)):
+        fixed = "~" + venv[len(home):]
+        print(f"note: --venv {venv} is under this machine's home; writing {fixed} (expanded on each node)")
+        venv = fixed
     c = {"host_ip": host_ip, "config_port": 5000,
          "network": {"bandwidth_gbps": bandwidth, "latency_ms": 1},
          "workers": [{"name": n, "ip": ip, "type": t} for n, ip, t in nodes],
@@ -339,7 +348,7 @@ def main():
     f.add_argument("hosts_txt")
     f.add_argument("--host-ip", default=None, help="coordinator IP (not one of the workers)")
     f.add_argument("--host-node", default=None,
-                   help="or: run the host on this node from hosts.txt (it stays a worker too)")
+                   help="or: run the host on this node from hosts.txt, by name (N09) or IP (it stays a worker too)")
     f.add_argument("--host-only", action="store_true",
                    help="with --host-node: do not use that node's GPU as a worker")
     f.add_argument("--env", default="runtime", help="conda env name or path")
