@@ -109,7 +109,7 @@ python cluster_ctl.py check
 python cluster_ctl.py install --clean
 ```
 
-安装前脚本会检查磁盘：torch、CUDA 库和 vLLM 装好后约占 7 GB，安装时 pip 还要在 `$TMPDIR`（默认 `/tmp`）暂存约 4 GB 下载文件。空间不够会直接停下并说明缺多少；`python cluster_ctl.py check` 也会列出每台节点的剩余空间。它依次做：
+安装前脚本会检查磁盘：torch、CUDA 库和 vLLM 装好后约占 7 GB，安装时 pip 还要在 `$TMPDIR`（默认 `/tmp`）暂存约 4 GB 下载文件。空间不够会直接停下并说明缺多少；`python cluster_ctl.py check` 也会列出每台节点的剩余空间。想知道空间被什么占了、哪些可以清理，运行 `python cluster_ctl.py disk`（只读，不删任何东西）：它在每台节点上运行 `tools/disk_report.sh`，按"可以放心删的缓存 / 需要你确认的数据 / 需要 sudo 的系统文件"分类列出大小和对应的清理命令，完整报告在 `logs/disk_<ip>.txt`。它依次做：
 
 1. 找 conda；没有且加了 `--install-conda` 时装 Miniforge 到 `~/miniforge3`（只用 conda-forge 源）。
 2. 建 Python 3.10 的 `runtime` 环境（venv 模式下改为在你现有的环境上建虚拟环境，见下文），并写 `~/.helix_env.sh`（之后所有远程命令用它激活环境）。

@@ -13,6 +13,7 @@ Run from this directory, ideally inside tmux/screen (profiling takes a while).
   python cluster_ctl.py collect [--bundle plan_inputs.tgz]   # profiles, for planning (here or elsewhere)
   python cluster_ctl.py push-plan [--bundle plan.tgz]        # plan files -> every node
   python cluster_ctl.py net-test --layout ilp  # real host + fake (no-GPU) workers: network/routing test
+  python cluster_ctl.py disk [--quick]         # what uses disk space on each node, what could be cleaned
   python cluster_ctl.py start-workers maxflow  # step3_start_worker.py on every worker (background)
   python cluster_ctl.py stop-workers
 
@@ -507,6 +508,38 @@ def cmd_net_test(c, rm, layout, duration):
     return ok
 
 
+def cmd_disk(c, rm, only, quick):
+    """tools/disk_report.sh on every node (read-only); full reports in logs/disk_<ip>.txt."""
+    import re
+    os.makedirs(LOG_DIR, exist_ok=True)
+    procs = {}
+    for ip in all_nodes(c, only):
+        log = os.path.join(LOG_DIR, f"disk_{ip}.txt")
+        cmd = f"cd {shlex.quote(rm.repo)} && bash tools/disk_report.sh{' --quick' if quick else ''}"
+        procs[ip] = (rm.popen(ip, cmd, log, setup=False), log)
+    print(f"scanning {len(procs)} node(s){' (quick)' if quick else ''} ...")
+    rows = []
+    for ip, (p, log) in procs.items():
+        try:
+            p.wait(timeout=1800)
+        except subprocess.TimeoutExpired:
+            p.kill()
+        text = open(log, errors="replace").read()
+        m = re.search(r"SUMMARY home_free_gb=(\d+) tmp_free_gb=(\d+) safe_gb=(\d+) review_gb=(\d+)", text)
+        rows.append((ip, m.groups() if m else None, log, text))
+    print(f"\n{'node':15s} {'home 剩余':>9s} {'/tmp 剩余':>9s} {'可放心清理':>10s} {'需确认':>7s}  清理缓存后 home 约")
+    for ip, g, log, text in rows:
+        if g is None:
+            tail = (text.strip().splitlines() or ["(no output)"])[-1]
+            print(f"{ip:15s} FAILED: {tail[:90]}   (full: {os.path.relpath(log, HERE)})")
+            continue
+        home, tmp, safe, review = (int(x) for x in g)
+        after = home + safe
+        flag = "够装 Helix" if after >= 11 else "仍不够 11 GB"
+        print(f"{ip:15s} {home:>7d}GB {tmp:>7d}GB {safe:>8d}GB {review:>5d}GB  {after:>4d}GB  {flag}")
+    print(f"\n每台的完整报告（含具体路径和清理命令）: {os.path.relpath(LOG_DIR, HERE)}/disk_<ip>.txt")
+
+
 def cmd_stop_workers(c, rm):
     for w in c["workers"]:
         # "[s]tep3": matches the workers but not the shell that runs this very command line
@@ -553,6 +586,9 @@ def main():
     s = sub.add_parser("start-workers")
     s.add_argument("method", choices=["maxflow", "swarm", "random"])
     sub.add_parser("stop-workers")
+    dk = sub.add_parser("disk", help="what uses disk space on each node and what could be cleaned (read-only)")
+    dk.add_argument("--nodes", nargs="*")
+    dk.add_argument("--quick", action="store_true", help="skip the slow scans (largest dirs / big files)")
     n = sub.add_parser("net-test", help="host + fake workers: test network and routing without GPUs")
     n.add_argument("--layout", default="ilp")
     n.add_argument("--duration", type=int, default=30)
@@ -580,6 +616,8 @@ def main():
         cmd_bandwidth(c, rm, a.pairs, a.port, a.seconds, a.write)
     elif a.cmd == "start-workers":
         cmd_start_workers(c, rm, a.method)
+    elif a.cmd == "disk":
+        cmd_disk(c, rm, a.nodes, a.quick)
     elif a.cmd == "net-test":
         sys.exit(0 if cmd_net_test(c, rm, a.layout, a.duration) else 1)
     else:
