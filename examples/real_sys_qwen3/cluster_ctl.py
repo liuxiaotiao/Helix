@@ -10,6 +10,8 @@ Run from this directory, ideally inside tmux/screen (profiling takes a while).
                                                #   results copied into the local profiles dir
   python cluster_ctl.py profile --types L4 --force
   python cluster_ctl.py bandwidth [--write]    # single-stream TCP Gb/s between nodes (-> cluster.json)
+  python cluster_ctl.py collect [--bundle plan_inputs.tgz]   # profiles (+ cluster.json) for planning
+  python cluster_ctl.py push-plan [--bundle plan.tgz]        # plan files -> every node
   python cluster_ctl.py net-test --layout ilp  # real host + fake (no-GPU) workers: network/routing test
   python cluster_ctl.py start-workers maxflow  # step3_start_worker.py on every worker (background)
   python cluster_ctl.py stop-workers
@@ -36,6 +38,7 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
+CWD0 = os.getcwd()
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
 sys.path.insert(0, REPO)
 import helix_cluster as hc  # noqa: E402
@@ -44,8 +47,16 @@ DEFAULT_RUN = "ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=
 DEFAULT_SETUP = "source ~/.helix_env.sh"
 SYNC_EXCLUDES = [".git", "./llm_sys/comm/build", "__pycache__", "*.egg-info", "*.pyc",
                  "./examples/real_sys_qwen3/logs", "./examples/real_sys_qwen3/result",
-                 "./examples/real_sys_qwen3/sim_files", "tmp_maxflow_*"]
-REMOTE_PROFILE_TMP = "/tmp/helix_qwen3_profiles"
+                 "./examples/real_sys_qwen3/sim_files", "tmp_maxflow_*",
+                 # plan data + measured profiles: never overwrite a node's copy with ours here;
+                 # they move with `collect` / `push-plan`
+                 "./simulator/model_manager/qwen3_30b_a3b/profiles", "./examples/real_sys_qwen3/config",
+                 "./examples/real_sys_qwen3/layouts", "./examples/real_sys_qwen3/deploy"]
+# repo-relative locations (the same on every node)
+PROFILE_REL = "simulator/model_manager/qwen3_30b_a3b/profiles"
+EXAMPLE_REL = "examples/real_sys_qwen3"
+PLAN_REL = [f"{EXAMPLE_REL}/cluster.json", f"{EXAMPLE_REL}/config", f"{EXAMPLE_REL}/layouts",
+            f"{EXAMPLE_REL}/deploy", PROFILE_REL]
 LOG_DIR = os.path.join(HERE, "logs")
 
 
@@ -220,7 +231,16 @@ def cmd_check(c, rm):
 
 
 # ------------------------------------------------------------------------------------------- #
-def cmd_profile(c, rm, types, force, extra):
+def fetch_profile(rm, ip, t):
+    """tar stream of <repo>/PROFILE_REL/<t> on node ip, or None if that node has no such profile."""
+    remote = f"{rm.repo}/{PROFILE_REL}"
+    r = subprocess.run(rm.argv(ip, f"test -f {shlex.quote(remote)}/{shlex.quote(t)}/meta.json && "
+                                   f"tar -C {shlex.quote(remote)} -cf - {shlex.quote(t)}", setup=False),
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+    return r.stdout if r.returncode == 0 and r.stdout else None
+
+
+def cmd_profile(c, rm, types, force, extra, fetch):
     from simulator.model_manager.qwen3_30b_a3b.qwen3_30b_a3b import get_profile_dir
     local_dir = get_profile_dir()
     os.makedirs(local_dir, exist_ok=True)
@@ -250,7 +270,7 @@ def cmd_profile(c, rm, types, force, extra):
 
     procs = {}
     for t, w in chosen.items():
-        out = local_dir if rm.shared_fs else REMOTE_PROFILE_TMP   # shared FS: same path everywhere
+        out = f"{rm.repo}/{PROFILE_REL}"     # kept on the profiled node, inside its repo copy
         flags = " --force" if force else ""
         vram = c.get("machine_types", {}).get(t, {}).get("vram_gb")
         if vram is None and t not in nominal:
@@ -278,23 +298,87 @@ def cmd_profile(c, rm, types, force, extra):
                 failed.append(t)
                 print(f"[FAIL] {t} on {w['ip']} exit {p.returncode}, see {log}")
                 continue
-            if not rm.shared_fs:     # copy <tmp>/<type>/ back through the same channel
-                fetch = subprocess.run(
-                    rm.argv(w["ip"], f"tar -C {REMOTE_PROFILE_TMP} -cf - {shlex.quote(t)}", setup=False),
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
-                if fetch.returncode != 0:
-                    failed.append(t)
-                    print(f"[FAIL] {t}: could not fetch results: {fetch.stderr.decode()[-300:]}")
-                    continue
-                subprocess.run(["tar", "-C", local_dir, "-xf", "-"], input=fetch.stdout, check=True)
-            ok = os.path.isfile(os.path.join(local_dir, t, "meta.json"))
-            if not ok:
+            data = fetch_profile(rm, w["ip"], t)
+            if data is None:
                 failed.append(t)
-            print(f"[{'done' if ok else 'FAIL'}] {t} after {time.time() - start:.0f}s -> "
-                  f"{os.path.join(local_dir, t)}")
+                print(f"[FAIL] {t}: no profile written on {w['ip']}, see {log}")
+                continue
+            where = f"{w['ip']}:{rm.repo}/{PROFILE_REL}/{t}"
+            if fetch and not rm.shared_fs:
+                subprocess.run(["tar", "-C", local_dir, "-xf", "-"], input=data, check=True)
+                where += f"  (copy here: {os.path.join(local_dir, t)})"
+            print(f"[done] {t} after {time.time() - start:.0f}s -> {where}")
     if failed:
         raise SystemExit(f"profiling failed for {failed}")
-    print("all profiles in place; next: python helix_cluster.py init")
+    print("profiles done. Plan here (python helix_cluster.py init ...), or elsewhere: "
+          "python cluster_ctl.py collect --bundle plan_inputs.tgz")
+
+
+def cmd_collect(c, rm, bundle):
+    """Profiles of every GPU type (from whichever node has one) [+ cluster.json] -> here or a bundle."""
+    import io
+    import tarfile
+    from simulator.model_manager.qwen3_30b_a3b.qwen3_30b_a3b import get_profile_dir
+    types = sorted({w["type"] for w in c["workers"]})
+    got, missing = {}, []
+    for t in types:
+        for w in [w for w in c["workers"] if w["type"] == t]:
+            data = fetch_profile(rm, w["ip"], t)
+            if data:
+                got[t] = (w["ip"], data)
+                break
+        else:
+            missing.append(t)
+    for t, (ip, _) in got.items():
+        print(f"  {t:9s} <- {ip}")
+    if missing:
+        print(f"  no profile on any node for {missing}: run `cluster_ctl.py profile --types {' '.join(missing)}`")
+    if bundle:
+        with tarfile.open(bundle, "w:gz") as out:
+            for t, (_, data) in got.items():
+                with tarfile.open(fileobj=io.BytesIO(data)) as src:
+                    for m in src.getmembers():
+                        f = src.extractfile(m) if m.isfile() else None
+                        m.name = f"{PROFILE_REL}/{m.name}"
+                        out.addfile(m, f)
+            out.add(os.path.join(HERE, "cluster.json"), arcname=f"{EXAMPLE_REL}/cluster.json")
+        print(f"wrote {bundle}: {len(got)} profile(s) + cluster.json. On the planning machine:\n"
+              f"  tar -xzf {os.path.basename(bundle)} -C <repo>   then helix_cluster.py init / layout / "
+              f"gen-config / export-plan")
+    else:
+        local_dir = get_profile_dir()
+        os.makedirs(local_dir, exist_ok=True)
+        for t, (_, data) in got.items():
+            subprocess.run(["tar", "-C", local_dir, "-xf", "-"], input=data, check=True)
+        print(f"profiles copied into {local_dir}")
+    if missing:
+        raise SystemExit(1)
+
+
+def cmd_push_plan(c, rm, bundle, only):
+    """Plan data (cluster.json, config/, layouts/, deploy/, profiles) -> every node's repo copy."""
+    if bundle:
+        subprocess.run(["tar", "-xzf", bundle, "-C", REPO], check=True)
+        print(f"unpacked {bundle} into {REPO}")
+        c = hc.load_cluster()      # the bundle may carry an updated cluster.json
+    if rm.shared_fs:
+        print("shared_fs is true: every node already sees the plan files.")
+        return
+    paths = [p for p in PLAN_REL if os.path.exists(os.path.join(REPO, p))]
+    tar = subprocess.run(["tar", "-C", REPO, "-czf", "-", "--exclude=__pycache__"] + paths,
+                         stdout=subprocess.PIPE, check=True).stdout
+    print(f"plan archive: {len(tar) / 1e3:.0f} KB ({', '.join(paths)})")
+    failed = []
+    for ip in all_nodes(c, only):
+        r = subprocess.run(rm.argv(ip, f"mkdir -p {shlex.quote(rm.repo)} && "
+                                       f"tar -C {shlex.quote(rm.repo)} -xzf - && echo pushed", setup=False),
+                           input=tar, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=300)
+        ok = r.returncode == 0 and b"pushed" in r.stdout
+        print(f"[{'done' if ok else 'FAIL'}] {ip}" + ("" if ok else f": {r.stderr.decode(errors='replace')[-300:]}"))
+        if not ok:
+            failed.append(ip)
+    if failed:
+        raise SystemExit(f"push-plan failed on {failed}")
 
 
 # ------------------------------------------------------------------------------------------- #
@@ -427,6 +511,14 @@ def main():
     p.add_argument("--types", nargs="*", help="only these GPU types (default: all in cluster.json)")
     p.add_argument("--force", action="store_true", help="skip the GPU-memory sanity check")
     p.add_argument("--extra", default="", help="extra args for tools/profile_qwen3_moe.py")
+    p.add_argument("--no-fetch", action="store_true",
+                   help="leave the results only on the profiled nodes (collect them later)")
+    co = sub.add_parser("collect", help="gather every GPU type's profile from the nodes")
+    co.add_argument("--bundle", default=None,
+                    help="write profiles + cluster.json to this .tgz (for planning on another machine)")
+    pp = sub.add_parser("push-plan", help="send cluster.json, config/, layouts/, deploy/, profiles to nodes")
+    pp.add_argument("--bundle", default=None, help="first unpack this plan .tgz (helix_cluster.py export-plan)")
+    pp.add_argument("--nodes", nargs="*")
     b = sub.add_parser("bandwidth")
     b.add_argument("--pairs", type=int, default=3)
     b.add_argument("--port", type=int, default=5099)
@@ -452,7 +544,11 @@ def main():
     elif a.cmd == "check":
         sys.exit(1 if cmd_check(c, rm) else 0)
     elif a.cmd == "profile":
-        cmd_profile(c, rm, a.types, a.force, a.extra)
+        cmd_profile(c, rm, a.types, a.force, a.extra, fetch=not a.no_fetch)
+    elif a.cmd == "collect":
+        cmd_collect(c, rm, a.bundle and os.path.abspath(os.path.join(CWD0, a.bundle)))
+    elif a.cmd == "push-plan":
+        cmd_push_plan(c, rm, a.bundle and os.path.abspath(os.path.join(CWD0, a.bundle)), a.nodes)
     elif a.cmd == "bandwidth":
         cmd_bandwidth(c, rm, a.pairs, a.port, a.seconds, a.write)
     elif a.cmd == "start-workers":

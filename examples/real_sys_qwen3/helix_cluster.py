@@ -10,6 +10,8 @@ Run from this directory (examples/real_sys_qwen3), on any machine with the repo 
   python helix_cluster.py layout ilp           # Helix MILP (Gurobi), starts from the best heuristic
   python helix_cluster.py simulate offline --layout ilp     # optional: simulated throughput
   python helix_cluster.py gen-config --layout ilp           # -> deploy/ilp/real_sys_config.txt + launch commands
+  python helix_cluster.py export-plan --layout ilp          # -> plan.tgz (planned elsewhere? push it with
+                                                            #    cluster_ctl.py push-plan --bundle plan.tgz)
 
 Then: step2_start_host.py on the host, step3_start_worker.py on every worker.
 Profiles for every GPU type in cluster.json must exist first (tools/profile_qwen3_moe.py).
@@ -171,6 +173,26 @@ def cmd_from_hosts(path, out, host_ip, host_node, env, venv, bandwidth):
     print(f"wrote {out}: host {host_ip}, {len(nodes)} workers {mix}")
 
 
+def cmd_export_plan(c, layout, out):
+    """cluster.json + config/ + layouts/<layout> + deploy/<layout> + used profiles -> one .tgz,
+    with repo-relative paths (unpack with `cluster_ctl.py push-plan --bundle`)."""
+    import tarfile
+    from simulator.model_manager.qwen3_30b_a3b.qwen3_30b_a3b import get_profile_dir
+    cfg = os.path.join(deploy_dir(layout), "real_sys_config.txt")
+    assert os.path.exists(cfg), f"{cfg} not found: run `helix_cluster.py gen-config --layout {layout}` first"
+    ex = "examples/real_sys_qwen3"
+    prof_rel = "simulator/model_manager/qwen3_30b_a3b/profiles"
+    with tarfile.open(out, "w:gz") as tar:
+        tar.add("cluster.json", arcname=f"{ex}/cluster.json")
+        tar.add("config", arcname=f"{ex}/config")
+        tar.add(layout_dir(layout), arcname=f"{ex}/{os.path.normpath(layout_dir(layout))}")
+        tar.add(deploy_dir(layout), arcname=f"{ex}/{os.path.normpath(deploy_dir(layout))}")
+        for t in sorted(machine_num_dict(c)):       # the host's maxflow scheduler reads these
+            tar.add(os.path.join(get_profile_dir(), t), arcname=f"{prof_rel}/{t}")
+    print(f"wrote {out}. On the cluster's control node:  python cluster_ctl.py push-plan --bundle "
+          f"{os.path.basename(out)}")
+
+
 def cmd_init(c):
     from simulator.event_simulator.utils import gbps, MilliSec
     from simulator.initial_layout.fake_cluster_generator import FakeClusterGenerator
@@ -318,6 +340,9 @@ def main():
     s.add_argument("--rate", type=float, default=None)
     g = sub.add_parser("gen-config")
     g.add_argument("--layout", default="ilp")
+    e = sub.add_parser("export-plan", help="pack the plan for the cluster (cluster_ctl.py push-plan --bundle)")
+    e.add_argument("--layout", default="ilp")
+    e.add_argument("--out", default="plan.tgz")
     a = ap.parse_args()
     if a.cmd == "from-hosts":
         cmd_from_hosts(os.path.join(cwd0, a.hosts_txt), a.cluster_json, a.host_ip, a.host_node, a.env, a.venv,
@@ -330,6 +355,8 @@ def main():
         cmd_layout(c, a.method, a.max_run_time)
     elif a.cmd == "simulate":
         cmd_simulate(a.mode, a.layout, a.duration, a.warm_up, a.rate)
+    elif a.cmd == "export-plan":
+        cmd_export_plan(c, a.layout, os.path.abspath(os.path.join(cwd0, a.out)))
     else:
         cmd_gen_config(c, a.layout)
 

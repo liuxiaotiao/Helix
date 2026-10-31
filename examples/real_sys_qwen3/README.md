@@ -130,19 +130,22 @@ bash tools/install_node.sh --env <你的环境名> --venv ~/helix-venv [--cuda-f
 
 ```bash
 python cluster_ctl.py check              # 逐台检查：能否连上、环境、GPU 型号/显存是否和 type 一致、通信库
-python cluster_ctl.py profile            # 每种 GPU 挑一台，并行跑 profiler，结果拉回本机 profiles/
+python cluster_ctl.py profile            # 每种 GPU 挑一台，并行跑 profiler；结果保存在被测节点上，并拷一份回本机
+                                         # （加 --no-fetch 则只保存在节点上）
 python cluster_ctl.py bandwidth --write  # 测几对节点间的单流 TCP 带宽，中位数写回 cluster.json
 ```
 
 - 远程命令先执行 `remote.pre`，再用 `~/.helix_env.sh` 激活环境。
-- 结果默认先写到节点的 `/tmp`，再通过同一条 ssh 通道打包拉回。如果节点和控制节点共享文件系统，设 `"shared_fs": true`，直接写进仓库。
+- 结果写在被测节点自己的仓库里（`simulator/model_manager/qwen3_30b_a3b/profiles/<类型>/`），会一直保留在那里；`sync` 不会覆盖它们。`python cluster_ctl.py collect` 随时可以从各节点重新收集。
 - 不在内置显存表里的卡型（比如 A6000）会自动用实测显存。也可以在 `machine_types` 里写明 `vram_gb`。
 - 多卡机器可以给 worker 加 `"gpu": <编号>`，采集和运行都只用这张卡。
 - 只想补测某种卡：`python cluster_ctl.py profile --types L4`。
 
 手动采集的方式也保留着：在某种卡上直接运行 `python tools/profile_qwen3_moe.py --machine L4`。
 
-### 3. 规划（控制节点上即可）
+### 3. 规划（控制节点上，或者你自己有 Gurobi 的电脑上）
+
+**在控制节点上规划：**
 
 ```bash
 python helix_cluster.py init             # -> config/cluster.ini、config/machine_profile.ini
@@ -155,13 +158,40 @@ python helix_cluster.py gen-config --layout ilp           # -> deploy/ilp/real_s
 
 `gen-config` 会打印每台机器分到的层和上下游，并检查 MAX_HOP、层覆盖、IP 唯一性。pip 版 gurobipy 自带的受限许可证只支持 2000 个变量/约束，24 个节点的模型就已接近这个上限，再大的集群需要 Gurobi 学术许可证（学校网络内可以免费申请）。
 
-### 4. 启动
-
-没有共享文件系统时，先再同步一次，把规划结果（`cluster.json`、profiles、`config/`、`layouts/`、`deploy/`）推到各节点，host 启动时要读它们：
+**在你自己的电脑上规划（用本地 Gurobi 许可证）：** profile 留在集群节点上，只把一个几十 KB 的包带回本地：
 
 ```bash
-python cluster_ctl.py sync
+# 1) 集群控制节点：收集各卡型的 profile 和 cluster.json
+python cluster_ctl.py collect --bundle plan_inputs.tgz
+# 2) 拷到本地电脑（scp 等），解到本地仓库根目录，然后规划并导出
+tar -xzf plan_inputs.tgz -C <本地仓库>
+cd <本地仓库>/examples/real_sys_qwen3
+python helix_cluster.py init
+python helix_cluster.py layout petals && python helix_cluster.py layout swarm   # 少于 8 台跳过 swarm
+python helix_cluster.py layout ilp
+python helix_cluster.py gen-config --layout ilp
+python helix_cluster.py export-plan --layout ilp --out plan.tgz
+# 3) 把 plan.tgz 拷回集群控制节点，推给所有节点
+python cluster_ctl.py push-plan --bundle plan.tgz
 ```
+
+本地只需要一个规划用的 Python 环境（3.10–3.12），不需要 torch、vLLM 或 GPU：
+
+```bash
+pip install "numpy~=1.26" "networkx~=3.2.1" "matplotlib~=3.8.2" "gurobipy==<和本地 Gurobi 许可证一致的版本>"
+```
+
+如果你的电脑能直接 ssh 到各节点，也可以在本地直接运行 `cluster_ctl.py collect`（不加 `--bundle`，profile 直接拷进本地仓库）和 `cluster_ctl.py push-plan`。
+
+### 4. 启动
+
+没有共享文件系统时，先把规划结果（`cluster.json`、profiles、`config/`、`layouts/`、`deploy/`）推到各节点，host 启动时要读它们（在本地规划的话，上一步的 `push-plan --bundle` 已经做了）：
+
+```bash
+python cluster_ctl.py push-plan
+```
+
+`sync` 只分发代码，不会碰这些规划文件和节点上的 profile。
 
 正式跑之前，建议先做一次不占 GPU 的网络测试：
 
