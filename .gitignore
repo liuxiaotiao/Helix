@@ -1,1 +1,8 @@
 .idea
+# build / install artifacts (made on the cluster nodes)
+llm_sys/comm/build/
+*.egg-info/
+__pycache__/
+*.pyc
+# plan bundles
+*.tgz

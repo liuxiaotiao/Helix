@@ -6,11 +6,11 @@ Run from this directory, ideally inside tmux/screen (profiling takes a while).
   python cluster_ctl.py install [--install-conda] [--cuda-from-conda]
                                                # tools/install_node.sh on every node, in parallel
   python cluster_ctl.py check                  # reachability, env, GPU model/VRAM vs. 'type', comm libs
-  python cluster_ctl.py profile                # profile one worker per GPU type, in parallel,
-                                               #   results copied into the local profiles dir
+  python cluster_ctl.py profile                # profile one worker per GPU type, in parallel;
+                                               #   results stay on those nodes (--fetch: copy here too)
   python cluster_ctl.py profile --types L4 --force
   python cluster_ctl.py bandwidth [--write]    # single-stream TCP Gb/s between nodes (-> cluster.json)
-  python cluster_ctl.py collect [--bundle plan_inputs.tgz]   # profiles (+ cluster.json) for planning
+  python cluster_ctl.py collect [--bundle plan_inputs.tgz]   # profiles, for planning (here or elsewhere)
   python cluster_ctl.py push-plan [--bundle plan.tgz]        # plan files -> every node
   python cluster_ctl.py net-test --layout ilp  # real host + fake (no-GPU) workers: network/routing test
   python cluster_ctl.py start-workers maxflow  # step3_start_worker.py on every worker (background)
@@ -314,7 +314,7 @@ def cmd_profile(c, rm, types, force, extra, fetch):
           "python cluster_ctl.py collect --bundle plan_inputs.tgz")
 
 
-def cmd_collect(c, rm, bundle):
+def cmd_collect(c, rm, bundle, with_cluster_json=False):
     """Profiles of every GPU type (from whichever node has one) [+ cluster.json] -> here or a bundle."""
     import io
     import tarfile
@@ -341,8 +341,10 @@ def cmd_collect(c, rm, bundle):
                         f = src.extractfile(m) if m.isfile() else None
                         m.name = f"{PROFILE_REL}/{m.name}"
                         out.addfile(m, f)
-            out.add(os.path.join(HERE, "cluster.json"), arcname=f"{EXAMPLE_REL}/cluster.json")
-        print(f"wrote {bundle}: {len(got)} profile(s) + cluster.json. On the planning machine:\n"
+            if with_cluster_json:
+                out.add(os.path.join(HERE, "cluster.json"), arcname=f"{EXAMPLE_REL}/cluster.json")
+        extra = " + cluster.json" if with_cluster_json else ""
+        print(f"wrote {bundle}: {len(got)} profile(s){extra}. On the planning machine:\n"
               f"  tar -xzf {os.path.basename(bundle)} -C <repo>   then helix_cluster.py init / layout / "
               f"gen-config / export-plan")
     else:
@@ -511,11 +513,15 @@ def main():
     p.add_argument("--types", nargs="*", help="only these GPU types (default: all in cluster.json)")
     p.add_argument("--force", action="store_true", help="skip the GPU-memory sanity check")
     p.add_argument("--extra", default="", help="extra args for tools/profile_qwen3_moe.py")
-    p.add_argument("--no-fetch", action="store_true",
-                   help="leave the results only on the profiled nodes (collect them later)")
+    p.add_argument("--fetch", action="store_true",
+                   help="also copy the results into this repo (default: they stay on the profiled "
+                        "nodes only, so a git checkout here stays clean; use `collect` later)")
     co = sub.add_parser("collect", help="gather every GPU type's profile from the nodes")
     co.add_argument("--bundle", default=None,
-                    help="write profiles + cluster.json to this .tgz (for planning on another machine)")
+                    help="write the profiles to this .tgz (for planning on another machine)")
+    co.add_argument("--with-cluster-json", action="store_true",
+                    help="also put this node's cluster.json into the bundle (default: no, the planning "
+                         "machine's copy is the one that counts)")
     pp = sub.add_parser("push-plan", help="send cluster.json, config/, layouts/, deploy/, profiles to nodes")
     pp.add_argument("--bundle", default=None, help="first unpack this plan .tgz (helix_cluster.py export-plan)")
     pp.add_argument("--nodes", nargs="*")
@@ -544,9 +550,9 @@ def main():
     elif a.cmd == "check":
         sys.exit(1 if cmd_check(c, rm) else 0)
     elif a.cmd == "profile":
-        cmd_profile(c, rm, a.types, a.force, a.extra, fetch=not a.no_fetch)
+        cmd_profile(c, rm, a.types, a.force, a.extra, fetch=a.fetch)
     elif a.cmd == "collect":
-        cmd_collect(c, rm, a.bundle and os.path.abspath(os.path.join(CWD0, a.bundle)))
+        cmd_collect(c, rm, a.bundle and os.path.abspath(os.path.join(CWD0, a.bundle)), a.with_cluster_json)
     elif a.cmd == "push-plan":
         cmd_push_plan(c, rm, a.bundle and os.path.abspath(os.path.join(CWD0, a.bundle)), a.nodes)
     elif a.cmd == "bandwidth":

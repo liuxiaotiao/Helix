@@ -130,9 +130,9 @@ bash tools/install_node.sh --env <你的环境名> --venv ~/helix-venv [--cuda-f
 
 ```bash
 python cluster_ctl.py check              # 逐台检查：能否连上、环境、GPU 型号/显存是否和 type 一致、通信库
-python cluster_ctl.py profile            # 每种 GPU 挑一台，并行跑 profiler；结果保存在被测节点上，并拷一份回本机
-                                         # （加 --no-fetch 则只保存在节点上）
-python cluster_ctl.py bandwidth --write  # 测几对节点间的单流 TCP 带宽，中位数写回 cluster.json
+python cluster_ctl.py profile            # 每种 GPU 挑一台，并行跑 profiler；结果只保存在被测节点上
+                                         # （加 --fetch 同时拷一份回本机；之后也可以用 collect 收集）
+python cluster_ctl.py bandwidth          # 测几对节点间的单流 TCP 带宽（--write 把中位数写回 cluster.json）
 ```
 
 - 远程命令先执行 `remote.pre`，再用 `~/.helix_env.sh` 激活环境。
@@ -158,30 +158,39 @@ python helix_cluster.py gen-config --layout ilp           # -> deploy/ilp/real_s
 
 `gen-config` 会打印每台机器分到的层和上下游，并检查 MAX_HOP、层覆盖、IP 唯一性。pip 版 gurobipy 自带的受限许可证只支持 2000 个变量/约束，24 个节点的模型就已接近这个上限，再大的集群需要 Gurobi 学术许可证（学校网络内可以免费申请）。
 
-**在你自己的电脑上规划（用本地 Gurobi 许可证）：** profile 留在集群节点上，只把一个几十 KB 的包带回本地：
+**在你自己的电脑上规划（用本地 Gurobi 许可证），代码通过 GitHub 到控制节点：**
+
+两个方向的数据量都很小。集群 → 本地只有 profile 和 `cluster.json`（几十 KB），用一个包拷回来；本地 → 集群的规划结果走 git。
 
 ```bash
-# 1) 集群控制节点：收集各卡型的 profile 和 cluster.json
+# A) 集群控制节点：采集，打包带回本地（不改动仓库里受版本管理的文件）
+git pull && python cluster_ctl.py sync          # 代码更新后先分发到各节点
+python cluster_ctl.py profile                  # 结果只留在被测节点上
+python cluster_ctl.py bandwidth                # 只打印带宽；把数值写进本地的 cluster.json
 python cluster_ctl.py collect --bundle plan_inputs.tgz
-# 2) 拷到本地电脑（scp 等），解到本地仓库根目录，然后规划并导出
+# 用 scp 等把 plan_inputs.tgz 拷到本地
+
+# B) 本地电脑：规划并提交
 tar -xzf plan_inputs.tgz -C <本地仓库>
 cd <本地仓库>/examples/real_sys_qwen3
 python helix_cluster.py init
 python helix_cluster.py layout petals && python helix_cluster.py layout swarm   # 少于 8 台跳过 swarm
 python helix_cluster.py layout ilp
 python helix_cluster.py gen-config --layout ilp
-python helix_cluster.py export-plan --layout ilp --out plan.tgz
-# 3) 把 plan.tgz 拷回集群控制节点，推给所有节点
-python cluster_ctl.py push-plan --bundle plan.tgz
+git add cluster.json config layouts/cluster/ilp deploy/ilp ../../simulator/model_manager/qwen3_30b_a3b/profiles
+git commit -m "Helix plan for the cluster" && git push
+
+# C) 集群控制节点：拉取并推给所有节点
+git pull && python cluster_ctl.py push-plan
+python cluster_ctl.py net-test --layout ilp
 ```
 
-本地只需要一个规划用的 Python 环境（3.10–3.12），不需要 torch、vLLM 或 GPU：
-
-```bash
-pip install "numpy~=1.26" "networkx~=3.2.1" "matplotlib~=3.8.2" "gurobipy==<和本地 Gurobi 许可证一致的版本>"
-```
-
-如果你的电脑能直接 ssh 到各节点，也可以在本地直接运行 `cluster_ctl.py collect`（不加 `--bundle`，profile 直接拷进本地仓库）和 `cluster_ctl.py push-plan`。
+要点：
+- **控制节点上不要改受版本管理的文件**，这样 `git pull` 永远不会冲突：`cluster.json` 只在本地改；不要用 `bandwidth --write`（它会改 `cluster.json`），也不要用 `profile --fetch`；打包文件 `*.tgz` 已被 `.gitignore` 忽略。
+- **节点不需要访问 GitHub**：控制节点 `git pull` 之后，用 `sync` 分发代码，用 `push-plan` 分发规划结果。
+- 本地只需要一个规划用的 Python 环境（3.10–3.12），不需要 torch、vLLM 或 GPU：`pip install "numpy~=1.26" "networkx~=3.2.1" "matplotlib~=3.8.2" "gurobipy==<和本地 Gurobi 许可证一致的版本>"`。
+- 不想经过 git 时，也可以用 `python helix_cluster.py export-plan --layout ilp --out plan.tgz` 打包，拷回控制节点后 `python cluster_ctl.py push-plan --bundle plan.tgz`（注意这样会改动控制节点仓库里的文件，下次 `git pull` 前要先清理）。
+- `hosts.txt`、`cluster.json` 里是集群内网 IP；如果 GitHub 仓库是公开的，留意这一点。
 
 ### 4. 启动
 
