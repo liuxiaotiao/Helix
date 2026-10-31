@@ -50,8 +50,7 @@ def load_cluster(path=CLUSTER_JSON) -> dict:
     dup = [ip for ip, n in Counter(ips).items() if n > 1]
     assert not dup, (f"cluster.json: duplicate worker IPs {dup}. Helix workers identify themselves "
                      f"by IP, so each worker needs its own IP (one worker = one machine = one GPU).")
-    assert c["host_ip"] not in ips, ("cluster.json: host_ip is also a worker IP. The host must run "
-                                     "on its own IP (it is machine 0 in real_sys_config.txt).")
+    # host_ip may equal one worker's IP: the host (coordinator, no GPU) then runs next to that worker
     for w in c["workers"]:
         assert w.get("type"), f"cluster.json: worker {w['ip']} has no 'type'"
     return c
@@ -145,14 +144,17 @@ def parse_hosts_txt(path):
     return nodes
 
 
-def cmd_from_hosts(path, out, host_ip, host_node, env, venv, bandwidth):
+def cmd_from_hosts(path, out, host_ip, host_node, env, venv, bandwidth, host_only=False):
     nodes = parse_hosts_txt(path)
     if host_node:
         match = [n for n in nodes if n[0] == host_node]
         assert match, f"--host-node {host_node} not in {path}"
         host_ip = match[0][1]
-        nodes = [n for n in nodes if n[0] != host_node]
-        print(f"host = {host_node} ({host_ip}); its GPU is not used as a worker")
+        if host_only:
+            nodes = [n for n in nodes if n[0] != host_node]
+            print(f"host = {host_node} ({host_ip}); its GPU is not used as a worker")
+        else:
+            print(f"host = {host_node} ({host_ip}), which also stays a worker")
     assert host_ip, "give --host-ip <coordinator IP> or --host-node <a node from hosts.txt>"
     c = {"host_ip": host_ip, "config_port": 5000,
          "network": {"bandwidth_gbps": bandwidth, "latency_ms": 1},
@@ -304,6 +306,18 @@ def summarize(c, machines, cfg_file):
         if not m["in_nodes"] and not m["out_nodes"]:
             idle.append(m["ip_address"])
     assert covered == set(range(48)), "layout does not cover all 48 layers!"
+    # host next to a worker (same IP): both bind <ip>:6000+<target> for their downstream nodes,
+    # so they must not send to a common target
+    host = next(m for m in machines if m["machine_id"] == 0)
+    for m in machines:
+        if m["machine_id"] != 0 and m["ip_address"] == host["ip_address"]:
+            clash = sorted(set(host["out_nodes"]) & set(m["out_nodes"]))
+            if clash:
+                raise SystemExit(f"host and worker {m['machine_id']} share {host['ip_address']} and both send "
+                                 f"to machine(s) {clash}: port clash on 6000+id. Put the host on another "
+                                 f"node (helix_cluster.py from-hosts --host-node ...) and re-run gen-config.")
+            print(f"\nhost runs on the same machine as worker {m['machine_id']} ({host['ip_address']}): "
+                  f"no port clash in this placement")
     if idle:
         print(f"\nNOTE: {idle} hold layers but have no links in this placement (no traffic will "
               f"reach them); starting their workers is optional.")
@@ -324,7 +338,10 @@ def main():
     f = sub.add_parser("from-hosts", help="write cluster.json from a hosts.txt (NAME IP[:PORT] # TYPE)")
     f.add_argument("hosts_txt")
     f.add_argument("--host-ip", default=None, help="coordinator IP (not one of the workers)")
-    f.add_argument("--host-node", default=None, help="or: use this node from hosts.txt as the host")
+    f.add_argument("--host-node", default=None,
+                   help="or: run the host on this node from hosts.txt (it stays a worker too)")
+    f.add_argument("--host-only", action="store_true",
+                   help="with --host-node: do not use that node's GPU as a worker")
     f.add_argument("--env", default="runtime", help="conda env name or path")
     f.add_argument("--venv", default=None, help="venv on top of --env (e.g. ~/helix-venv)")
     f.add_argument("--bandwidth-gbps", type=float, default=10)
@@ -346,7 +363,7 @@ def main():
     a = ap.parse_args()
     if a.cmd == "from-hosts":
         cmd_from_hosts(os.path.join(cwd0, a.hosts_txt), a.cluster_json, a.host_ip, a.host_node, a.env, a.venv,
-                       a.bandwidth_gbps)
+                       a.bandwidth_gbps, a.host_only)
         return
     c = load_cluster(a.cluster_json)
     if a.cmd == "init":

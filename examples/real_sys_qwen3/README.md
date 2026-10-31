@@ -15,7 +15,7 @@
 | `llm_sys/utils.py`、`maxflow_host.py`、`heuristic_host.py` | host 地址和本机 IP 可以用环境变量 `HELIX_CONFIG_BROADCAST_ADDR` / `HELIX_LOCAL_IP` 覆盖；不设时行为和原来一样。`torch` 改为延迟导入，规划工具不需要装 torch。 |
 | `llm_sys/comm/build.sh`、`llm_sys/comm/setup.py`、`CMakeLists.txt` | 构建时使用当前环境的 Python / torch / conda / venv 路径，不再写死；CMakeLists 显式定义 `ZMQ_BUILD_DRAFT_API`（`poller.h` 需要），找不到已安装的 cppzmq 时用仓库里附带的头文件。 |
 | `llm_sys/comm/third_party/cppzmq/` | **新增**。cppzmq 4.11.0 的两个头文件和 MIT 许可证。 |
-| `llm_sys/comm/src/compute_worker.h` | 环境变量 `HELIX_COMM_CPU_TENSORS=1` 时把收到的张量留在 CPU（只给 `tools/fake_worker.py` 的网络测试用）；不设时行为不变。 |
+| `llm_sys/comm/src/compute_worker.h` | worker 按 IP 认领配置时跳过 0 号机（host），使 host 可以和 worker 同机；环境变量 `HELIX_COMM_CPU_TENSORS=1` 时把收到的张量留在 CPU（只给 `tools/fake_worker.py` 的网络测试用），不设时行为不变。 |
 | `setup.py`、`requirements.txt` | gurobipy 约束从 `~=11.0.0` 放宽为 `>=11.0`（11.x 自带许可证已过期，用 13）。 |
 
 ## stage 的实现要点
@@ -81,7 +81,8 @@ GPU 测试会在每个用例后打印 `ok` 或 `BAD`，全部通过时最后一�
 
 ### 角色与约束
 
-- **host（协调者）**：一台机器，不需要 GPU，但需要装 torch 和通信库。它的 IP **不能**同时跑 worker（worker 按 IP 认领配置，host 是 0 号机）。
+- **host（协调者）**：不需要 GPU，但需要装 torch 和通信库。可以单独一台机器，也可以和某个 worker 放在同一台机器上（`host_ip` 等于那个 worker 的 IP，或 `from-hosts --host-node <节点>`），这样所有 GPU 都能参与推理。同机时 `gen-config` 会检查两者没有端口冲突。
+- **控制节点**：运行 `cluster_ctl.py` 的机器，可以是任意一台（包括某个 worker）。
 - **worker**：每台机器（每个 IP）只跑一个 worker、只用一张 GPU（多卡机器用 `CUDA_VISIBLE_DEVICES` 选一张）。
 - 每种 GPU 最多能放的层数 = VRAM/2 ÷ 1.246 GB：T4/V100 6 层，L4 9 层，A100-40G 16 层，A100-80G/H100 32 层。全部 worker 加起来至少要能放下 48 层，最好留余量。
 - 端口：host 的 5000（可在 `cluster.json` 改），以及所有机器的 6000 ~ 6000+节点数，节点之间必须互通。

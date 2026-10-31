@@ -83,7 +83,8 @@ void receiver_thread(const std::string &config_broadcast_addr, const std::string
     // get the machine config for the current worker
     Machine current_machine;
     for (const auto &machine: machine_configs) {
-        if (machine.ip_address == worker_ip) {
+        // skip machine 0 (the host): the host may run on the same machine / IP as a worker
+        if (machine.ip_address == worker_ip && machine.machine_id != 0) {
             current_machine = machine;
             break;
         }
@@ -516,7 +517,8 @@ void sender_thread(const std::string &worker_ip) {
     // get the machine config for the current worker
     Machine current_machine;
     for (const auto &machine: machine_configs) {
-        if (machine.ip_address == worker_ip) {
+        // skip machine 0 (the host): the host may run on the same machine / IP as a worker
+        if (machine.ip_address == worker_ip && machine.machine_id != 0) {
             current_machine = machine;
             break;
         }

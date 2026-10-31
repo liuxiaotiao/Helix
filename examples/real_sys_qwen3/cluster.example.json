@@ -1,5 +1,5 @@
 {
-  "_comment": "Copy to cluster.json and edit. host = the coordinator (no GPU needed, must NOT also run a worker). One worker per machine / IP, one GPU per worker (optional \"gpu\": index). 'type' names the GPU model and the profile directory. bandwidth_gbps: measure with `python cluster_ctl.py bandwidth --write`.",
+  "_comment": "Copy to cluster.json and edit. host = the coordinator (no GPU needed; it may run on a worker machine, i.e. host_ip may equal a worker IP). One worker per machine / IP, one GPU per worker (optional \"gpu\": index). 'type' names the GPU model and the profile directory. bandwidth_gbps: measure with `python cluster_ctl.py bandwidth --write`.",
   "host_ip": "10.0.0.1",
   "config_port": 5000,
   "network": {

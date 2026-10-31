@@ -88,7 +88,7 @@ class Remote:
 
 def all_nodes(c, only=None):
     """host first, then workers; optionally restricted to the IPs in `only`."""
-    ips = [c["host_ip"]] + [w["ip"] for w in c["workers"]]
+    ips = list(dict.fromkeys([c["host_ip"]] + [w["ip"] for w in c["workers"]]))   # host may share a worker's IP
     if only:
         unknown = set(only) - set(ips)
         assert not unknown, f"not in cluster.json: {sorted(unknown)}"
