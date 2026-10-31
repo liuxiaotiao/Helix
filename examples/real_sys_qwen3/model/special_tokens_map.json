@@ -1,0 +1,6 @@
+{
+  "bos_token": "<t151643>",
+  "eos_token": "<t151645>",
+  "pad_token": "<t151645>",
+  "unk_token": "<t0>"
+}

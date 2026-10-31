@@ -1,0 +1,2 @@
+cppzmq 4.11.0 (https://github.com/zeromq/cppzmq), header-only C++ binding for libzmq, MIT licence (see LICENSE).
+Used by CMakeLists.txt when no installed cppzmq CMake package is found.

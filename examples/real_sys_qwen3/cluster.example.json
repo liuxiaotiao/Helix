@@ -1,0 +1,63 @@
+{
+  "_comment": "Copy to cluster.json and edit. host = the coordinator (no GPU needed, must NOT also run a worker). One worker per machine / IP, one GPU per worker (optional \"gpu\": index). 'type' names the GPU model and the profile directory. bandwidth_gbps: measure with `python cluster_ctl.py bandwidth --write`.",
+  "host_ip": "10.0.0.1",
+  "config_port": 5000,
+  "network": {
+    "bandwidth_gbps": 10,
+    "latency_ms": 1
+  },
+  "workers": [
+    {
+      "ip": "10.0.0.11",
+      "type": "A100"
+    },
+    {
+      "ip": "10.0.0.12",
+      "type": "A100"
+    },
+    {
+      "ip": "10.0.0.21",
+      "type": "L4"
+    },
+    {
+      "ip": "10.0.0.22",
+      "type": "L4"
+    },
+    {
+      "ip": "10.0.0.23",
+      "type": "L4"
+    },
+    {
+      "ip": "10.0.0.31",
+      "type": "T4"
+    },
+    {
+      "ip": "10.0.0.32",
+      "type": "T4"
+    },
+    {
+      "ip": "10.0.0.33",
+      "type": "T4"
+    },
+    {
+      "ip": "10.0.0.34",
+      "type": "T4"
+    }
+  ],
+  "machine_types": {
+    "_comment": "Optional: VRAM per type in GB (1e9 bytes). Defaults: T4/V100 16, L4/A10G/A30/RTX6000 (Quadro RTX 6000) 24, A100 40, A6000 (RTX A6000)/L40S 48, A100-80G/H100 80.",
+    "A100": {
+      "vram_gb": 40
+    }
+  },
+  "remote": {
+    "_comment": "How the control node reaches nodes (cluster_ctl.py). run: command prefix, {ip} substituted (password-less ssh); pre: run first on every node (e.g. module load cuda/12.4); env: conda env name (created by `install` unless venv is set); venv: path for a Python venv built on top of the EXISTING conda env `env` (everything is installed into the venv, nothing into the conda env), e.g. ~/helix-venv; setup: activates the environment (default: source ~/.helix_env.sh, written by `install`); repo: repo path on nodes (default: same as here); shared_fs: nodes see this same directory.",
+    "run": "ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=30 {ip}",
+    "pre": "",
+    "env": "runtime",
+    "venv": null,
+    "setup": null,
+    "repo": null,
+    "shared_fs": false
+  }
+}

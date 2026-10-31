@@ -1,0 +1,31 @@
+from setuptools import setup, find_packages
+
+# To ensure modules are imported correctly, the project's root directory must be in sys.path.
+# The recommended way is to install the project in editable mode:
+#   pip install -e .
+# If that fails (sometimes pip will not update path when using with conda), manually add the
+# project to your PYTHONPATH:
+#   export PYTHONPATH=$PYTHONPATH:/path/to/project
+setup(
+    name="helix",
+    version="1.0.0",
+    packages=find_packages(),
+    install_requires=[
+        "numpy~=1.26",
+        "networkx~=3.2.1",
+        "matplotlib~=3.8.2",
+        "gurobipy>=11.0",  # 11.x bundled licence expired 2025-11; 13.x works
+    ],
+    author="Yixuan Mei",
+    author_email="yixuanm@andrew.cmu.edu",
+    description="Official implementation of Helix.",
+    long_description=open("readme.md").read(),
+    long_description_content_type="text/markdown",
+    url="https://github.com/Thesys-lab/Helix-ASPLOS25",
+    classifiers=[
+        "Programming Language :: Python :: 3",
+        "License :: OSI Approved :: Apache Software License",
+        "Operating System :: POSIX :: Linux",
+    ],
+    python_requires=">=3.6",
+)

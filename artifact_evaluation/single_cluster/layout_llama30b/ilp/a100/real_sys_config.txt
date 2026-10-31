@@ -1,0 +1,35 @@
+machine_id: 0
+ip_address: 10.128.0.31
+in_nodes: 4
+out_nodes: 1
+start_layer: -1
+end_layer: -1
+
+machine_id: 1
+ip_address: 10.128.0.14
+in_nodes: 0
+out_nodes: 2
+start_layer: 0
+end_layer: 15
+
+machine_id: 2
+ip_address: 10.128.0.41
+in_nodes: 1
+out_nodes: 3
+start_layer: 15
+end_layer: 30
+
+machine_id: 3
+ip_address: 10.128.0.42
+in_nodes: 2
+out_nodes: 4
+start_layer: 30
+end_layer: 45
+
+machine_id: 4
+ip_address: 10.128.0.43
+in_nodes: 3
+out_nodes: 0
+start_layer: 45
+end_layer: 60
+

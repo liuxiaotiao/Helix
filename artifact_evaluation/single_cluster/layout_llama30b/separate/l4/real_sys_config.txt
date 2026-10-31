@@ -1,0 +1,63 @@
+machine_id: 0
+ip_address: 10.128.0.31
+in_nodes: 8
+out_nodes: 1
+start_layer: -1
+end_layer: -1
+
+machine_id: 1
+ip_address: 10.128.0.16
+in_nodes: 0
+out_nodes: 2
+start_layer: 0
+end_layer: 7
+
+machine_id: 2
+ip_address: 10.128.0.20
+in_nodes: 1
+out_nodes: 3
+start_layer: 7
+end_layer: 14
+
+machine_id: 3
+ip_address: 10.128.0.21
+in_nodes: 2
+out_nodes: 4
+start_layer: 14
+end_layer: 21
+
+machine_id: 4
+ip_address: 10.128.0.22
+in_nodes: 3
+out_nodes: 5
+start_layer: 21
+end_layer: 28
+
+machine_id: 5
+ip_address: 10.128.0.23
+in_nodes: 4
+out_nodes: 6
+start_layer: 28
+end_layer: 36
+
+machine_id: 6
+ip_address: 10.128.0.24
+in_nodes: 5
+out_nodes: 7
+start_layer: 36
+end_layer: 44
+
+machine_id: 7
+ip_address: 10.128.0.25
+in_nodes: 6
+out_nodes: 8
+start_layer: 44
+end_layer: 52
+
+machine_id: 8
+ip_address: 10.128.0.30
+in_nodes: 7
+out_nodes: 0
+start_layer: 52
+end_layer: 60
+
