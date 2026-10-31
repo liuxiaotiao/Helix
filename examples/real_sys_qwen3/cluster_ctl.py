@@ -226,6 +226,21 @@ def cmd_check(c, rm):
         for lvl, msg in check_worker(rm, w, nominal):
             bad += lvl == "FAIL"
             print(f"[{lvl}] {w['ip']:15s} {w['type']:9s} {msg}")
+    # free disk space (a fresh install needs ~7 GB for the env + ~4 GB of downloads in $TMPDIR)
+    venv_dir = rm.venv or "~"
+    for ip in all_nodes(c):
+        r = rm.run(ip, f"d={venv_dir}; while [ ! -d \"$d\" ]; do d=$(dirname \"$d\"); done; "
+                       f"df -Pk \"$d\" ${{TMPDIR:-/tmp}} | awk 'NR>1 {{printf \"%d \", $4/1048576}}'",
+                   setup=False, timeout=60)
+        try:
+            env_gb, tmp_gb = (int(x) for x in r.stdout.split()[:2])
+        except ValueError:
+            print(f"[WARN] {ip:15s} disk: could not read free space")
+            continue
+        low = env_gb < 11 or tmp_gb < 4
+        print(f"[{'WARN' if low else 'OK'}] {ip:15s} disk: {env_gb} GB free for the env "
+              f"({rm.venv or 'home'}), {tmp_gb} GB free in $TMPDIR"
+              + (" -- a (re)install of torch/vLLM needs ~11 GB / ~4 GB" if low else ""))
     print("all good" if not bad else f"{bad} problem(s)")
     return bad
 
@@ -510,6 +525,9 @@ def main():
     i.add_argument("--install-conda", action="store_true", help="install Miniforge where conda is missing")
     i.add_argument("--cuda-from-conda", action="store_true", help="install nvcc into the env if missing")
     i.add_argument("--rebuild", action="store_true", help="rebuild llm_sys/comm")
+    i.add_argument("--clean", action="store_true",
+                   help="reinstall from scratch: delete the venv (or the Helix-created conda env), the "
+                        "comm build, ~/.helix_env.sh and the pip cache on each node first")
     sub.add_parser("check")
     p = sub.add_parser("profile")
     p.add_argument("--types", nargs="*", help="only these GPU types (default: all in cluster.json)")
@@ -547,7 +565,8 @@ def main():
     elif a.cmd == "install":
         flags = " ".join(f for f, on in [("--install-conda", a.install_conda),
                                           ("--cuda-from-conda", a.cuda_from_conda),
-                                          ("--rebuild", a.rebuild)] if on)
+                                          ("--rebuild", a.rebuild),
+                                          ("--clean", a.clean)] if on)
         cmd_install(c, rm, a.nodes, a.all, flags)
     elif a.cmd == "check":
         sys.exit(1 if cmd_check(c, rm) else 0)

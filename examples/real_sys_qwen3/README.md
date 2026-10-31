@@ -101,7 +101,15 @@ python cluster_ctl.py install --install-conda --cuda-from-conda
 python cluster_ctl.py check
 ```
 
-`install` 在每个节点上并行运行 `tools/install_node.sh`，日志在控制节点的 `logs/install_<ip>.log`。这个脚本可以重复运行，已完成的步骤会跳过，所以某台失败了修好原因再跑一次即可（也可以 `--nodes <ip>` 只重装那一台）。它依次做：
+`install` 在每个节点上并行运行 `tools/install_node.sh`，日志在控制节点的 `logs/install_<ip>.log`。这个脚本可以重复运行，已完成的步骤会跳过，所以某台失败了修好原因再跑一次即可（也可以 `--nodes <ip>` 只重装那一台）。
+
+想**所有节点从头重装**（包括已经装好的）时加 `--clean`：每个节点先删除虚拟环境（venv 模式）或本脚本创建的 conda 环境、`llm_sys/comm/build`、`~/.helix_env.sh` 和 pip 缓存，再完整安装。它不会删除不是本脚本创建的 conda 环境（例如你自己的 `moe`），也只删除确实是 Python 虚拟环境的目录。
+
+```bash
+python cluster_ctl.py install --clean
+```
+
+安装前脚本会检查磁盘：torch、CUDA 库和 vLLM 装好后约占 7 GB，安装时 pip 还要在 `$TMPDIR`（默认 `/tmp`）暂存约 4 GB 下载文件。空间不够会直接停下并说明缺多少；`python cluster_ctl.py check` 也会列出每台节点的剩余空间。它依次做：
 
 1. 找 conda；没有且加了 `--install-conda` 时装 Miniforge 到 `~/miniforge3`（只用 conda-forge 源）。
 2. 建 Python 3.10 的 `runtime` 环境（venv 模式下改为在你现有的环境上建虚拟环境，见下文），并写 `~/.helix_env.sh`（之后所有远程命令用它激活环境）。

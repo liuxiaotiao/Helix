@@ -18,6 +18,9 @@
 #   --cuda-from-conda   if nvcc is missing, install a CUDA 12.1 compiler (conda mode: into the env;
 #                       venv mode: into <venv>/toolchain). Otherwise load one first (module load ...)
 #   --rebuild           rebuild llm_sys/comm even if llm_worker / llm_host import fine
+#   --clean             start over: delete the venv (venv mode) or the Helix-created conda env
+#                       (conda mode), llm_sys/comm/build, ~/.helix_env.sh and the pip cache first.
+#                       Never deletes a conda env that this script did not create.
 #   --dry-run           only print what would be done
 #
 # Writes ~/.helix_env.sh (activates conda env [+ venv]); cluster_ctl.py uses it.
@@ -30,6 +33,7 @@ CONDA_DIR="$HOME/miniforge3"
 INSTALL_CONDA=false
 CUDA_FROM_CONDA=false
 REBUILD=false
+CLEAN=false
 DRY=false
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -39,6 +43,7 @@ while [ $# -gt 0 ]; do
     --install-conda) INSTALL_CONDA=true; shift;;
     --cuda-from-conda) CUDA_FROM_CONDA=true; shift;;
     --rebuild) REBUILD=true; shift;;
+    --clean) CLEAN=true; shift;;
     --dry-run) DRY=true; shift;;
     *) echo "unknown option $1"; exit 2;;
   esac
@@ -91,6 +96,33 @@ env_exists() {
 }
 
 # ------------------------------------------------------------------------------------------- #
+if $CLEAN; then
+  step "clean: remove the previous Helix installation"
+  if [ "$MODE" = venv ]; then
+    if [ -e "$VENV" ]; then
+      # refuse anything that does not look like a venv (never $HOME, /, a conda env, ...)
+      [ "$VENV" != "/" ] && [ "$VENV" != "$HOME" ] && [ -f "$VENV/pyvenv.cfg" ] \
+        || die "--clean: $VENV does not look like a Python venv (no pyvenv.cfg); not deleting it"
+      run rm -rf "$VENV"
+      log "removed venv $VENV"
+    fi
+  else
+    CLEAN_PREFIX=""
+    if env_exists; then
+      case "$ENV_NAME" in */*) CLEAN_PREFIX="$ENV_NAME";;
+        *) CLEAN_PREFIX="$(conda env list | awk -v n="$ENV_NAME" '$1 == n {print $NF}')";; esac
+    fi
+    if [ -n "$CLEAN_PREFIX" ]; then
+      [ -f "$CLEAN_PREFIX/conda-meta/.helix_created" ] \
+        || die "--clean: conda env '$ENV_NAME' was not created by this script; remove it yourself if you mean it"
+      run conda env remove -y -p "$CLEAN_PREFIX"
+      log "removed conda env $CLEAN_PREFIX"
+    fi
+  fi
+  run rm -rf "$REPO/llm_sys/comm/build" "$HOME/.helix_env.sh" "$HOME/.cache/pip"
+  log "removed llm_sys/comm/build, ~/.helix_env.sh and the pip cache"
+fi
+
 if [ "$MODE" = conda ]; then
   step "2/7 conda env '$ENV_NAME' (Python 3.10)"
   if ! $DRY && env_exists; then
@@ -98,6 +130,8 @@ if [ "$MODE" = conda ]; then
   else
     case "$ENV_NAME" in */*) ENV_FLAG=(-p "$ENV_NAME");; *) ENV_FLAG=(-n "$ENV_NAME");; esac
     run conda create -y "${ENV_FLAG[@]}" "${CONDA_CHANNELS[@]}" python=3.10
+    # mark it as ours, so that --clean may delete it later
+    $DRY || touch "$(conda run "${ENV_FLAG[@]}" python -c 'import sys; print(sys.prefix)')/conda-meta/.helix_created"
   fi
 else
   step "2/7 venv $VENV on top of the existing conda env '$ENV_NAME'"
@@ -153,7 +187,29 @@ EOF
 then
   log "already installed"
 else
-  run pip install "vllm==0.4.0.post1" "transformers==4.40.2" "numpy~=1.26"
+  # torch 2.1.2 + CUDA libs + vLLM need ~7 GB in the env and ~4 GB of downloads in $TMPDIR while
+  # pip installs. Check first instead of failing half-way with "No space left on device".
+  free_gb() { df -Pk "$1" 2>/dev/null | awk 'NR==2 {printf "%d", $4 / 1048576}'; }
+  fs_of() { df -P "$1" 2>/dev/null | awk 'NR==2 {print $1}'; }
+  SITE_DIR="$(python -c 'import site; print(site.getsitepackages()[0])')"
+  TMP_DIR="${TMPDIR:-/tmp}"
+  if [ -z "${HELIX_SKIP_SPACE_CHECK:-}" ] && ! $DRY; then
+    if [ "$(fs_of "$SITE_DIR")" = "$(fs_of "$TMP_DIR")" ]; then
+      [ "$(free_gb "$SITE_DIR")" -ge 11 ] || die "only $(free_gb "$SITE_DIR") GB free on the disk of $SITE_DIR and $TMP_DIR; ~11 GB needed.
+       Free space (e.g. pip cache purge; conda clean -a), put the venv on a bigger disk (cluster.json
+       remote.venv), or set TMPDIR to another disk (remote.pre: export TMPDIR=/bigdisk/tmp)."
+    else
+      [ "$(free_gb "$SITE_DIR")" -ge 7 ] || die "only $(free_gb "$SITE_DIR") GB free for $SITE_DIR; ~7 GB needed.
+       Free space (pip cache purge; conda clean -a) or put the venv on a bigger disk (cluster.json remote.venv)."
+      [ "$(free_gb "$TMP_DIR")" -ge 4 ] || die "only $(free_gb "$TMP_DIR") GB free in $TMP_DIR; ~4 GB needed for pip's downloads.
+       Set TMPDIR to a bigger disk (cluster.json remote.pre: export TMPDIR=/bigdisk/tmp)."
+    fi
+    log "disk: $(free_gb "$SITE_DIR") GB free for $SITE_DIR, $(free_gb "$TMP_DIR") GB free in $TMP_DIR"
+  fi
+  # no pip cache (saves ~3 GB); retry / resume interrupted downloads
+  PIP_NET=(--no-cache-dir --retries 10 --timeout 60)
+  pip install --help 2>/dev/null | grep -q -- "--resume-retries" && PIP_NET+=(--resume-retries 10)
+  run pip install "${PIP_NET[@]}" "vllm==0.4.0.post1" "transformers==4.40.2" "numpy~=1.26"
 fi
 
 # ------------------------------------------------------------------------------------------- #
