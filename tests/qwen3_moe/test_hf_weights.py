@@ -175,8 +175,11 @@ def main():
 
     with tempfile.TemporaryDirectory() as d:
         make_checkpoint(d, big=True)
-        stats = load_stage_weights(fake_stage(1), WeightIndex(d))
-        good = stats["fp16_overflow"] == {"model.layers.1.o_proj": 1}
+        st1 = fake_stage(1)
+        stats = load_stage_weights(st1, WeightIndex(d))
+        o = st1.decoder_layer.self_attn.o_proj.weight
+        good = stats["fp16_overflow"] == {"model.layers.1.o_proj": 1} and bool(torch.isfinite(o).all()) \
+            and float(o.float().abs().max()) == 65504.0
         print(f"  {'ok ' if good else 'BAD'} fp16 overflow reported + clamped: {stats['fp16_overflow']}")
         ok &= good
 

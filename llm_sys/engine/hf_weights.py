@@ -76,12 +76,17 @@ class WeightIndex:
 def _copy(dst: torch.Tensor, src: torch.Tensor, name: str, stats: dict):
     if tuple(dst.shape) != tuple(src.shape):
         raise ValueError(f"{name}: checkpoint shape {tuple(src.shape)} != parameter slice {tuple(dst.shape)}")
-    if dst.dtype == torch.float16:
-        big = int((src.float().abs() > FP16_MAX).sum())
+    # move the checkpoint tensor (bf16) to the parameter's device first: the range check and the
+    # dtype conversion then run there (on the GPU for a real worker) instead of making fp32
+    # copies of every tensor on the CPU, which made loading 9 layers take minutes
+    src = src.to(device=dst.device)
+    if dst.dtype == torch.float16 and src.dtype != torch.float16:
+        big = int((src.abs() > FP16_MAX).sum())
         if big:
             stats["fp16_overflow"][name] = big
+            # in fp32: 65504 is not representable in bf16 (it would round to 65536 -> inf)
             src = src.float().clamp(-FP16_MAX, FP16_MAX)
-    dst.copy_(src.to(device=dst.device, dtype=dst.dtype))
+    dst.copy_(src.to(dtype=dst.dtype))
     stats["copied"] += 1
 
 

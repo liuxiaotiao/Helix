@@ -271,7 +271,7 @@ python step2_start_host.py online maxflow --layout ilp --rate <上一步给出�
    ```
    - `--prompts random`（默认）：随机 token 组成的 prompt，长度和输出长度仍按 Azure 对话数据集抽样，所以吞吐和 dummy 运行可比。
    - `--prompts 文件.jsonl`：每行一个 `{"prompt": "..."}` 或 `{"messages": [{"role": "user", "content": "..."}]}`，可选 `"max_tokens"`。`messages` 会套上 Qwen 的对话模板。第 k 个请求用第 k % N 行。
-   - worker 加载权重需要一两分钟，`--real` 时 host 默认先等 120 秒再发请求（`--init-wait` 可改）。
+   - worker 加载权重需要几分钟（放 9 层的节点最慢）。`--real` 时 host 下发配置后会轮询各 worker 的日志，等所有 worker 都打印 `[Python] Ready` 才开始发请求；有 worker 报错会直接停下并指出是哪台（`--ready-timeout` 默认 1200 秒；`--init-wait N` 改成固定等待 N 秒）。
 4. 结果：`result/<方法>_<模式>_<布局>/generations.jsonl`，每行一个请求，包含 prompt、生成的 token id 和解码后的文字（在第一个 EOS 处截断）。`step4_parse_results.py` 照常统计性能。
 
 说明：

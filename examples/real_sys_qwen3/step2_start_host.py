@@ -30,6 +30,41 @@ os.chdir(HERE)
 import helix_cluster as hc  # noqa: E402  (light: no simulator / torch import)
 
 
+def wait_for_workers(c, timeout: float):
+    """Block until every worker's log (logs/worker_<ip>.log, as written by `cluster_ctl.py
+    start-workers`) says "[Python] Ready", i.e. its engine is built and its weights are loaded.
+    Workers only start loading once the host has sent the config, so this runs inside the host."""
+    import shlex
+    import subprocess
+    import time
+    from cluster_ctl import Remote
+    rm = Remote(c)
+    d = os.path.join(rm.repo, "examples", "real_sys_qwen3")
+    pending = [w["ip"] for w in c["workers"]]
+    t0 = time.time()
+    print(f"[host] waiting until all {len(pending)} workers report Ready (loading weights) ...", flush=True)
+    while pending:
+        time.sleep(10)
+        procs = {ip: subprocess.Popen(rm.argv(ip, f"cat {shlex.quote(d)}/logs/worker_{ip}.log 2>/dev/null | "
+                                                  f"grep -E '\\[Python\\] Ready|Traceback|Error' | head -3",
+                                              setup=False), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                                     stdin=subprocess.DEVNULL, text=True) for ip in pending}
+        for ip, p in procs.items():
+            out = p.communicate(timeout=60)[0]
+            if "[Python] Ready" in out:
+                pending.remove(ip)
+            elif "Traceback" in out or "Error" in out:
+                raise SystemExit(f"[host] worker {ip} failed while starting: {out.strip()[-300:]} "
+                                 f"(see {d}/logs/worker_{ip}.log on {ip})")
+        waited = time.time() - t0
+        if pending:
+            print(f"[host]   {waited:4.0f}s: still loading on {pending}", flush=True)
+        if pending and waited > timeout:
+            raise SystemExit(f"[host] workers {pending} not ready after {timeout:.0f}s; check their logs "
+                             f"(or pass --init-wait N to just wait N seconds)")
+    print(f"[host] all workers ready after {time.time() - t0:.0f}s", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("mode", choices=["online", "offline"])
@@ -40,8 +75,10 @@ def main():
     ap.add_argument("--prompts", default="random", help='with --real: "random" or a JSONL file of prompts')
     ap.add_argument("--seed", type=int, default=0, help="seed of the random prompts")
     ap.add_argument("--init-wait", type=float, default=None,
-                    help="seconds to wait after sending the config before the first request "
-                         "(default 20; 120 with --real, while workers load their weights)")
+                    help="seconds to wait after sending the config before the first request (default "
+                         "20; with --real the host instead waits until every worker reports Ready)")
+    ap.add_argument("--ready-timeout", type=float, default=1200,
+                    help="--real: give up if some worker is not ready after this many seconds")
     ap.add_argument("--rate", type=float, default=None, help="online: avg total tokens/s")
     ap.add_argument("--result-dir", default=None, help="default ./result/<method>_<mode>_<layout>/")
     ap.add_argument("--initial-launch", type=int, default=None,
@@ -85,10 +122,14 @@ def main():
         if a.real and a.prompts != "random" and not os.path.exists(a.prompts):
             raise SystemExit(f"--prompts {a.prompts}: no such file")
         token_io = make_token_io(a.real, a.prompts, weights_dir, seed=a.seed)
-        init_wait = a.init_wait if a.init_wait is not None else (120 if a.real else 20)
+        if a.init_wait is not None:
+            init_wait = a.init_wait
+        elif a.real:
+            init_wait = lambda: wait_for_workers(c, a.ready_timeout)  # noqa: E731
+        else:
+            init_wait = 20
         if a.real:
-            print(f"[host] REAL generation: greedy, prompts={a.prompts}, tokenizer {weights_dir}, "
-                  f"waiting {init_wait:g}s for the workers to load weights", flush=True)
+            print(f"[host] REAL generation: greedy, prompts={a.prompts}, tokenizer {weights_dir}", flush=True)
         common = dict(machine_num_dict=hc.machine_num_dict(c), model_name=ModelName.Qwen3_30B_A3B,
                       complete_cluster_file_name=hc.CLUSTER_INI,
                       machine_profile_name=hc.MACHINE_PROFILE_INI,

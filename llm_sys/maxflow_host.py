@@ -146,7 +146,9 @@ def run_maxflow_host_online(
     host_ip: str = get_local_ip()
     llm_sys.utils.assert_usable_local_ip(host_ip)
     llm_host.start_network_threads(CONFIG_BROADCAST_ADDR, host_ip, real_sys_config_file_name, "maxflow")
-    time.sleep(init_wait)   # workers load their layers meanwhile
+    # workers build their engines (and load real weights) meanwhile: wait a fixed time, or until
+    # a readiness check passes (step2_start_host.py --real waits for every worker's "Ready")
+    init_wait() if callable(init_wait) else time.sleep(init_wait)
     print("[Python] Cluster initialization finished!")
     # -------------------------------------------------------------------------------------- #
     ground_zero = time.time()
@@ -347,7 +349,9 @@ def run_maxflow_host_offline(
     host_ip: str = get_local_ip()
     llm_sys.utils.assert_usable_local_ip(host_ip)
     llm_host.start_network_threads(CONFIG_BROADCAST_ADDR, host_ip, real_sys_config_file_name, "maxflow")
-    time.sleep(init_wait)   # workers load their layers meanwhile
+    # workers build their engines (and load real weights) meanwhile: wait a fixed time, or until
+    # a readiness check passes (step2_start_host.py --real waits for every worker's "Ready")
+    init_wait() if callable(init_wait) else time.sleep(init_wait)
     print("[Python] Cluster initialization finished!")
     # -------------------------------------------------------------------------------------- #
     ground_zero = time.time()
