@@ -20,6 +20,8 @@ Run from this directory, ideally inside tmux/screen (profiling takes a while).
   python cluster_ctl.py weights --layout ilp [--clean] [--dry-run]
                                                # HF safetensors shards for each worker's layers
                                                #   -> cluster.json "weights": {"dir": ..., "repo": ...}
+                                               #   (shows a progress table every --interval s)
+  python cluster_ctl.py weights-status --watch 10   # the same progress table, from any terminal
 
 cluster.json "remote" section (all optional):
   "run":       command prefix that runs one shell command on a node; {ip} is substituted.
@@ -607,13 +609,109 @@ def layer_ranges(layout):
     return out
 
 
-def cmd_weights(c, rm, layout, wdir, repo, clean, dry_run, every, only, max_parallel):
-    """tools/fetch_weights.py on every worker: the HF shards for that worker's layers."""
-    wcfg = c.get("weights", {})
-    wdir = wdir or wcfg.get("dir")
-    repo = repo or wcfg.get("repo") or "Qwen/Qwen3-30B-A3B"
+WEIGHTS_PROGRESS = ".helix_weights_progress.json"   # written by tools/fetch_weights.py
+
+
+def _weights_dir(c, wdir):
+    wdir = wdir or c.get("weights", {}).get("dir")
     if not wdir:
         raise SystemExit('give --dir, or set "weights": {"dir": "..."} in cluster.json')
+    return wdir
+
+
+def poll_weights(rm, ips, wdir):
+    """ip -> (progress dict or None, bytes in the directory or None), all nodes in parallel."""
+    q = shlex.quote(wdir)
+    cmd = f"cat {q}/{WEIGHTS_PROGRESS} 2>/dev/null || echo '{{}}'; echo; du -sb {q} 2>/dev/null | cut -f1"
+    procs = {ip: subprocess.Popen(rm.argv(ip, cmd, setup=False), stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, text=True)
+             for ip in ips}
+    out = {}
+    for ip, p in procs.items():
+        try:
+            text, _ = p.communicate(timeout=30)
+            first, _, rest = text.strip().partition("\n")
+            prog = json.loads(first) or None
+            size = int(rest.strip()) if rest.strip().isdigit() else None
+            out[ip] = (prog, size)
+        except Exception:  # noqa: BLE001
+            p.kill()
+            out[ip] = (None, None)
+    return out
+
+
+def _dur(s):
+    s = int(max(0, s))
+    return f"{s // 3600}h{s // 60 % 60:02d}m" if s >= 3600 else f"{s // 60}m{s % 60:02d}s"
+
+
+def print_weights_table(ips, polled, prev, interval, status=None):
+    """One refresh of the progress table. prev: ip -> (time, bytes) of the last poll (updated here).
+    status: ip -> 'running'/'done'/'FAIL'/'queued' as seen by this control process (optional)."""
+    now = time.time()
+    if sys.stdout.isatty():
+        print("\033[H\033[J", end="")          # clear the screen: a refreshing table
+    print(f"[{time.strftime('%H:%M:%S')}] weight download progress"
+          + (f" (refresh every {interval:g}s; " + ("Ctrl-C only stops watching)" if status is None else
+             "Ctrl-C ABORTS the downloads, rerun without --clean to resume)") if interval else ""))
+    print(f"  {'node':15s} {'state':11s} {'done / need':>17s} {'%':>5s} {'speed':>10s} {'ETA':>8s} "
+          f"{'shards':>6s}  current")
+    tot_done = tot_need = tot_speed = 0.0
+    for ip in ips:
+        prog, size = polled.get(ip, (None, None))
+        st = (status or {}).get(ip)
+        if not prog:
+            state = st or ("unreachable" if size is None else "not started")
+            print(f"  {ip:15s} {state:11s}")
+            continue
+        need = prog.get("need", 0)
+        done = need if prog.get("state") == "done" else max(0, min(need, (size or 0) - prog.get("base", 0)))
+        speed = 0.0
+        if ip in prev and size is not None and now > prev[ip][0]:
+            speed = max(0.0, (size - prev[ip][1]) / (now - prev[ip][0]))
+        elif prog.get("state") == "downloading" and now > prog.get("started", now):
+            speed = done / (now - prog["started"])              # first poll: average so far
+        if size is not None:
+            prev[ip] = (now, size)
+        state = prog.get("state", "?")
+        if st == "FAIL" or state == "failed":
+            state = "FAILED"
+        pct = 100.0 * done / need if need else 100.0
+        eta = _dur((need - done) / speed) if state == "downloading" and speed > 1e5 else ""
+        cur = (prog.get("current") or "").replace(".safetensors", "")
+        print(f"  {ip:15s} {state:11s} {done / 1e9:7.1f}/{need / 1e9:5.1f} GB {pct:5.0f} "
+              f"{speed / 1e6 if state == 'downloading' else 0:7.0f} MB/s {eta:>8s} "
+              f"{prog.get('shards_done', 0)}/{prog.get('shards_total', 0):<4d}  {cur}"
+              + (f"  {prog.get('error', '')[:60]}" if state == "FAILED" else ""))
+        tot_done += done
+        tot_need += need
+        tot_speed += speed if state == "downloading" else 0
+    pct = 100.0 * tot_done / tot_need if tot_need else 0
+    eta = _dur((tot_need - tot_done) / tot_speed) if tot_speed > 1e5 else ""
+    print(f"  {'TOTAL':15s} {'':11s} {tot_done / 1e9:7.1f}/{tot_need / 1e9:5.1f} GB {pct:5.0f} "
+          f"{tot_speed / 1e6:7.0f} MB/s {eta:>8s}", flush=True)
+
+
+def cmd_weights_status(c, rm, wdir, only, watch):
+    wdir = _weights_dir(c, wdir)
+    ips = list(dict.fromkeys(w["ip"] for w in c["workers"] if not only or w["ip"] in only))
+    prev = {}
+    try:
+        while True:
+            print_weights_table(ips, poll_weights(rm, ips, wdir), prev, watch or 0)
+            if not watch:
+                break
+            time.sleep(watch)
+    except KeyboardInterrupt:
+        print()
+
+
+def cmd_weights(c, rm, layout, wdir, repo, clean, dry_run, every, only, max_parallel, interval=15,
+                no_xet=False):
+    """tools/fetch_weights.py on every worker: the HF shards for that worker's layers."""
+    wcfg = c.get("weights", {})
+    wdir = _weights_dir(c, wdir)
+    repo = repo or wcfg.get("repo") or "Qwen/Qwen3-30B-A3B"
     ranges = {} if every else layer_ranges(layout)
     ips = [w["ip"] for w in c["workers"]]
     ips = list(dict.fromkeys(ip for ip in ips if not only or ip in only))
@@ -630,15 +728,44 @@ def cmd_weights(c, rm, layout, wdir, repo, clean, dry_run, every, only, max_para
         args = ["--dir", shlex.quote(wdir), "--repo", shlex.quote(repo)]
         args += ["--all"] if every else [x for s, e in ranges[ip] for x in ("--layers", str(s), str(e))]
         args += (["--clean"] if clean else []) + (["--dry-run"] if dry_run else [])
+        args += ["--no-xet"] if no_xet else []
         cmd = (f"cd {shlex.quote(rm.repo)} && {env + ' ' if env else ''}"
                f"python tools/fetch_weights.py {' '.join(args)}")
         jobs.append((ip, cmd, os.path.join(LOG_DIR, f"weights_{ip}.log")))
         print(f"  {ip}: {'all' if every else ' '.join(f'[{s},{e})' for s, e in ranges[ip])}")
     failed = []
-    for k in range(0, len(jobs), max_parallel):
-        procs = {ip: (rm.popen(ip, cmd, log), log) for ip, cmd, log in jobs[k:k + max_parallel]}
-        print(f"downloading on {len(procs)} node(s) in parallel; progress: tail -f logs/weights_<ip>.log")
-        failed += wait_all(procs, ok_marker="HELIX_WEIGHTS_OK")
+    if dry_run:
+        for k in range(0, len(jobs), max_parallel):
+            procs = {ip: (rm.popen(ip, cmd, log), log) for ip, cmd, log in jobs[k:k + max_parallel]}
+            failed += wait_all(procs, ok_marker="HELIX_WEIGHTS_OK")
+    else:
+        # at most max_parallel nodes at a time; a progress table refreshes every `interval` s
+        queue, running, status, prev = list(jobs), {}, {ip: "queued" for ip, _, _ in jobs}, {}
+        ips = [ip for ip, _, _ in jobs]
+        last = 0.0
+        while queue or running:
+            while queue and len(running) < max_parallel:
+                ip, cmd, log = queue.pop(0)
+                running[ip] = (rm.popen(ip, cmd, log), log)
+                status[ip] = "running"
+            for ip in list(running):
+                p, log = running[ip]
+                if p.poll() is None:
+                    continue
+                del running[ip]
+                ok = p.returncode == 0 and "HELIX_WEIGHTS_OK" in open(log, errors="replace").read()
+                status[ip] = "done" if ok else "FAIL"
+                if not ok:
+                    failed.append(ip)
+            if time.time() - last >= interval or not (queue or running):
+                print_weights_table(ips, poll_weights(rm, ips, wdir), prev, interval, status)
+                last = time.time()
+            if queue or running:
+                time.sleep(3)
+        for ip in failed:
+            print(f"[FAIL] {ip}  (log: logs/weights_{ip}.log)")
+            for line in open(os.path.join(LOG_DIR, f"weights_{ip}.log"), errors="replace").read().strip().splitlines()[-6:]:
+                print(f"         | {line}")
     for ip, _, log in jobs:
         lines = [x for x in open(log, errors="replace").read().splitlines() if "shard(s)" in x]
         if lines:
@@ -710,6 +837,13 @@ def main():
     wt.add_argument("--all", action="store_true", help="every shard on every node (whole model, ~61 GB)")
     wt.add_argument("--nodes", nargs="*")
     wt.add_argument("--max-parallel", type=int, default=15, help="nodes downloading at the same time")
+    wt.add_argument("--interval", type=float, default=15, help="seconds between progress refreshes")
+    wt.add_argument("--no-xet", action="store_true",
+                    help="plain HTTPS downloads instead of HF Xet storage (when Xet transfers fail)")
+    ws = sub.add_parser("weights-status", help="download progress of `weights` on every node (any terminal)")
+    ws.add_argument("--dir", default=None)
+    ws.add_argument("--nodes", nargs="*")
+    ws.add_argument("--watch", type=float, default=0, help="refresh every N seconds (0: print once)")
     a = ap.parse_args()
 
     c = hc.load_cluster()
@@ -742,7 +876,9 @@ def main():
         sys.exit(0 if cmd_net_test(c, rm, a.layout, a.duration) else 1)
     elif a.cmd == "weights":
         sys.exit(0 if cmd_weights(c, rm, a.layout, a.dir, a.repo, a.clean, a.dry_run, a.all, a.nodes,
-                                  a.max_parallel) else 1)
+                                  a.max_parallel, a.interval, a.no_xet) else 1)
+    elif a.cmd == "weights-status":
+        cmd_weights_status(c, rm, a.dir, a.nodes, a.watch)
     else:
         cmd_stop_workers(c, rm)
 

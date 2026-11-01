@@ -28,6 +28,7 @@ SMALL_FILES = ["config.json", "generation_config.json", "model.safetensors.index
                "tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt",
                "special_tokens_map.json", "LICENSE", "README.md"]
 MANIFEST = ".helix_weights.json"
+PROGRESS = ".helix_weights_progress.json"   # read by cluster_ctl.py weights / weights-status
 
 
 def needed_prefixes(ranges, total_layers):
@@ -50,6 +51,32 @@ def shards_for(weight_map, prefixes):
     return sorted(want)
 
 
+def _lfs_sha(info):
+    lfs = getattr(info, "lfs", None)
+    if lfs is None:
+        return None
+    return lfs.get("sha256") if isinstance(lfs, dict) else getattr(lfs, "sha256", None)
+
+
+def remote_sha256(repo, revision, files):
+    """file -> sha256 of the LFS object on the Hub (None if unknown)."""
+    from huggingface_hub import HfApi
+    try:
+        got = {i.path: _lfs_sha(i) for i in HfApi().get_paths_info(repo, files, revision=revision)}
+    except Exception:  # noqa: BLE001
+        got = {}
+    return {f: got.get(f) for f in files}
+
+
+def sha256_of(path):
+    import hashlib
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(16 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def remote_sizes(repo, revision, files):
     """file -> bytes on the Hub (None if unknown)."""
     from huggingface_hub import HfApi
@@ -67,7 +94,7 @@ def remote_sizes(repo, revision, files):
             return {f: None for f in files}
 
 
-def download(repo, revision, filename, local_dir, retries=5):
+def download(repo, revision, filename, local_dir, retries=8):
     from huggingface_hub import hf_hub_download
     kw = dict(repo_id=repo, filename=filename, revision=revision, local_dir=local_dir)
     params = inspect.signature(hf_hub_download).parameters
@@ -82,7 +109,7 @@ def download(repo, revision, filename, local_dir, retries=5):
         except Exception as e:  # noqa: BLE001
             if attempt == retries:
                 raise
-            wait = min(60, 5 * attempt)
+            wait = min(120, 15 * attempt)
             print(f"  retry {attempt}/{retries - 1} for {filename} in {wait}s: {type(e).__name__}: "
                   f"{str(e)[:200]}", flush=True)
             time.sleep(wait)
@@ -132,7 +159,12 @@ def main():
     ap.add_argument("--clean", action="store_true", help="delete everything inside --dir first")
     ap.add_argument("--dry-run", action="store_true", help="only print what would happen")
     ap.add_argument("--reserve-gb", type=float, default=2.0, help="keep this much disk free")
+    ap.add_argument("--no-xet", action="store_true",
+                    help="plain HTTPS download instead of HF's Xet storage (use when Xet transfers fail)")
+    ap.add_argument("--no-verify", action="store_true", help="skip the sha256 check of downloaded shards")
     a = ap.parse_args()
+    if a.no_xet:   # must be set before huggingface_hub is imported (it reads it at import time)
+        os.environ["HF_HUB_DISABLE_XET"] = "1"
     assert a.all or a.layers, "give --layers START END (repeatable) or --all"
 
     d = os.path.abspath(os.path.expanduser(a.dir))
@@ -190,15 +222,60 @@ def main():
         print("HELIX_WEIGHTS_OK")
         return
 
+    # partial downloads (<dir>/.cache/huggingface/download/*.incomplete) are resumed by the next
+    # run, but a partial file written by the Xet client must not be continued by a plain HTTP
+    # download (or vice versa): drop them when the download mode changed
+    mode = "http" if os.environ.get("HF_HUB_DISABLE_XET") else "xet"
+    mode_file = os.path.join(d, ".helix_download_mode")
+    old_mode = open(mode_file).read().strip() if os.path.exists(mode_file) else None
+    if old_mode and old_mode != mode:
+        import glob
+        stale = glob.glob(os.path.join(d, ".cache", "huggingface", "download", "**", "*.incomplete"),
+                          recursive=True)
+        for f in stale:
+            os.remove(f)
+        if stale:
+            print(f"[weights] download mode {old_mode} -> {mode}: removed {len(stale)} partial file(s)")
+    with open(mode_file, "w") as f:
+        f.write(mode)
+    print(f"[weights] download mode: {mode}", flush=True)
+    shas = {} if a.no_verify else remote_sha256(a.repo, a.revision, todo)
+
+    # progress file for `cluster_ctl.py weights` / `weights-status`: bytes downloaded so far =
+    # size of the directory (partial files included) minus `base`
+    prog = {"state": "downloading", "need": need, "base": dir_size(d), "shards_total": len(todo),
+            "shards_done": 0, "current": None, "started": time.time(), "updated": time.time()}
+
+    def save_progress(**kw):
+        prog.update(kw, updated=time.time())
+        tmp = os.path.join(d, PROGRESS + ".tmp")
+        with open(tmp, "w") as f:
+            json.dump(prog, f)
+        os.replace(tmp, os.path.join(d, PROGRESS))
+
     t0 = time.time()
-    for k, s in enumerate(todo, 1):
-        t = time.time()
-        download(a.repo, a.revision, s, d)
-        sz = os.path.getsize(os.path.join(d, s))
-        if sizes[s] is not None and sz != sizes[s]:
-            raise SystemExit(f"{s}: got {sz} bytes, expected {sizes[s]}")
-        print(f"[weights] {k}/{len(todo)} {s} {gb(sz)} in {time.time() - t:.0f}s "
-              f"({sz / max(time.time() - t, 1e-3) / 1e6:.0f} MB/s)", flush=True)
+    try:
+        for k, s in enumerate(todo, 1):
+            save_progress(current=s)
+            t = time.time()
+            download(a.repo, a.revision, s, d)
+            sz = os.path.getsize(os.path.join(d, s))
+            if sizes[s] is not None and sz != sizes[s]:
+                os.remove(os.path.join(d, s))
+                raise SystemExit(f"{s}: got {sz} bytes, expected {sizes[s]} (deleted; rerun to retry)")
+            if shas.get(s):
+                save_progress(current=s + " (sha256 check)")
+                got = sha256_of(os.path.join(d, s))
+                if got != shas[s]:
+                    os.remove(os.path.join(d, s))
+                    raise SystemExit(f"{s}: sha256 mismatch (deleted; rerun to retry)")
+            save_progress(shards_done=k)
+            print(f"[weights] {k}/{len(todo)} {s} {gb(sz)} in {time.time() - t:.0f}s "
+                  f"({sz / max(time.time() - t, 1e-3) / 1e6:.0f} MB/s)", flush=True)
+    except BaseException as e:
+        save_progress(state="failed", error=f"{type(e).__name__}: {str(e)[:300]}")
+        raise
+    save_progress(state="done", current=None)
 
     with open(os.path.join(d, MANIFEST), "w") as f:
         json.dump({"repo": a.repo, "revision": a.revision, "layers": a.layers, "all": a.all,
