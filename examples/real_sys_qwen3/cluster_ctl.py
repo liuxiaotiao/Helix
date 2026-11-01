@@ -17,6 +17,9 @@ Run from this directory, ideally inside tmux/screen (profiling takes a while).
   python cluster_ctl.py gpus                   # GPU memory in use + the processes holding it
   python cluster_ctl.py start-workers maxflow  # step3_start_worker.py on every worker (background)
   python cluster_ctl.py stop-workers
+  python cluster_ctl.py weights --layout ilp [--clean] [--dry-run]
+                                               # HF safetensors shards for each worker's layers
+                                               #   -> cluster.json "weights": {"dir": ..., "repo": ...}
 
 cluster.json "remote" section (all optional):
   "run":       command prefix that runs one shell command on a node; {ip} is substituted.
@@ -591,6 +594,59 @@ def cmd_gpus(c, rm):
     print(f"\n{free} of {len(c['workers'])} GPUs free. Helix (test_gpu_stage, profile, workers) needs them free.")
 
 
+def layer_ranges(layout):
+    """ip -> [(start, end)] from deploy/<layout>/real_sys_config.txt (machine 0 = host, skipped)."""
+    cfg = os.path.join(hc.deploy_dir(layout), "real_sys_config.txt")
+    if not os.path.exists(cfg):
+        raise SystemExit(f"{cfg} not found: run `helix_cluster.py gen-config --layout {layout}` "
+                         f"(and push-plan) first")
+    out = {}
+    for m in hc.parse_real_sys_config(cfg):
+        if m["machine_id"] != 0:
+            out.setdefault(m["ip_address"], []).append((m["start_layer"], m["end_layer"]))
+    return out
+
+
+def cmd_weights(c, rm, layout, wdir, repo, clean, dry_run, every, only, max_parallel):
+    """tools/fetch_weights.py on every worker: the HF shards for that worker's layers."""
+    wcfg = c.get("weights", {})
+    wdir = wdir or wcfg.get("dir")
+    repo = repo or wcfg.get("repo") or "Qwen/Qwen3-30B-A3B"
+    if not wdir:
+        raise SystemExit('give --dir, or set "weights": {"dir": "..."} in cluster.json')
+    ranges = {} if every else layer_ranges(layout)
+    ips = [w["ip"] for w in c["workers"]]
+    ips = list(dict.fromkeys(ip for ip in ips if not only or ip in only))
+    os.makedirs(LOG_DIR, exist_ok=True)
+    env = " ".join(f"{k}={shlex.quote(os.environ[k])}" for k in ("HF_ENDPOINT", "HF_TOKEN") if os.environ.get(k))
+    print(f"{repo} -> {wdir} on {len(ips)} node(s), "
+          f"{'every shard' if every else f'layers of layout {layout!r}'}"
+          f"{', CLEANING the directory first' if clean else ''}{' (dry run)' if dry_run else ''}")
+    jobs = []
+    for ip in ips:
+        if not every and ip not in ranges:
+            print(f"  {ip}: holds no layers in layout {layout!r}, skipped")
+            continue
+        args = ["--dir", shlex.quote(wdir), "--repo", shlex.quote(repo)]
+        args += ["--all"] if every else [x for s, e in ranges[ip] for x in ("--layers", str(s), str(e))]
+        args += (["--clean"] if clean else []) + (["--dry-run"] if dry_run else [])
+        cmd = (f"cd {shlex.quote(rm.repo)} && {env + ' ' if env else ''}"
+               f"python tools/fetch_weights.py {' '.join(args)}")
+        jobs.append((ip, cmd, os.path.join(LOG_DIR, f"weights_{ip}.log")))
+        print(f"  {ip}: {'all' if every else ' '.join(f'[{s},{e})' for s, e in ranges[ip])}")
+    failed = []
+    for k in range(0, len(jobs), max_parallel):
+        procs = {ip: (rm.popen(ip, cmd, log), log) for ip, cmd, log in jobs[k:k + max_parallel]}
+        print(f"downloading on {len(procs)} node(s) in parallel; progress: tail -f logs/weights_<ip>.log")
+        failed += wait_all(procs, ok_marker="HELIX_WEIGHTS_OK")
+    for ip, _, log in jobs:
+        lines = [x for x in open(log, errors="replace").read().splitlines() if "shard(s)" in x]
+        if lines:
+            print(f"  {ip:15s} {lines[-1].split('] ', 1)[-1]}")
+    print("weights: all nodes OK" if not failed else f"weights: FAILED on {failed}")
+    return not failed
+
+
 def cmd_stop_workers(c, rm):
     for w in c["workers"]:
         # "[s]tep3": matches the workers but not the shell that runs this very command line
@@ -645,6 +701,15 @@ def main():
     n = sub.add_parser("net-test", help="host + fake workers: test network and routing without GPUs")
     n.add_argument("--layout", default="ilp")
     n.add_argument("--duration", type=int, default=30)
+    wt = sub.add_parser("weights", help="download the HF safetensors shards each worker needs for its layers")
+    wt.add_argument("--layout", default="ilp", help="which placement decides each node's layers")
+    wt.add_argument("--dir", default=None, help='target directory on the nodes (default: cluster.json "weights.dir")')
+    wt.add_argument("--repo", default=None, help='HF repo (default: "weights.repo" or Qwen/Qwen3-30B-A3B)')
+    wt.add_argument("--clean", action="store_true", help="DELETE everything inside the directory first")
+    wt.add_argument("--dry-run", action="store_true", help="show shards / sizes / free disk, change nothing")
+    wt.add_argument("--all", action="store_true", help="every shard on every node (whole model, ~61 GB)")
+    wt.add_argument("--nodes", nargs="*")
+    wt.add_argument("--max-parallel", type=int, default=15, help="nodes downloading at the same time")
     a = ap.parse_args()
 
     c = hc.load_cluster()
@@ -675,6 +740,9 @@ def main():
         cmd_disk(c, rm, a.nodes, a.quick)
     elif a.cmd == "net-test":
         sys.exit(0 if cmd_net_test(c, rm, a.layout, a.duration) else 1)
+    elif a.cmd == "weights":
+        sys.exit(0 if cmd_weights(c, rm, a.layout, a.dir, a.repo, a.clean, a.dry_run, a.all, a.nodes,
+                                  a.max_parallel) else 1)
     else:
         cmd_stop_workers(c, rm)
 

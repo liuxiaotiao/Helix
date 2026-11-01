@@ -90,5 +90,9 @@
     "setup": null,
     "repo": null,
     "shared_fs": false
+  },
+  "weights": {
+    "dir": "/home/ubuntu/p2p-framework/weights-q3-30b",
+    "repo": "Qwen/Qwen3-30B-A3B"
   }
 }
