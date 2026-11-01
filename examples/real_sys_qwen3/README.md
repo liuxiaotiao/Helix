@@ -251,9 +251,37 @@ python step2_start_host.py online maxflow --layout ilp --rate <上一步给出�
 
 `result/<方法>_<模式>_<布局>/query_route.txt` 里记录了每个请求实际走的路径。
 
+### 6. 用真实权重运行（可选）
+
+默认的 dummy 权重只用于测性能，生成的 token 没有意义。用真实权重运行时，worker 加载各自那几层的 HuggingFace 权重，最后一级用 greedy 采样出真实 token，host 再把它送回第一级作为下一步的输入，并把生成结果保存下来。
+
+1. 下载各节点需要的分片（按当前布局，每台只下自己那几层；中断后重跑会续传）：
+   ```bash
+   python cluster_ctl.py weights --layout ilp --curl        # 目录在 cluster.json 的 "weights.dir"
+   ```
+2. host 节点需要重新编译一次通信库（`host.h` 放开了 decode 时 token 必须为 -1 的限制；worker 不需要）：
+   ```bash
+   python cluster_ctl.py install --rebuild --nodes <host_ip>
+   ```
+3. 启动 worker 和 host：
+   ```bash
+   python cluster_ctl.py start-workers maxflow --real
+   python step2_start_host.py offline maxflow --real --duration 120                          # 随机 prompt
+   python step2_start_host.py offline maxflow --real --prompts prompts_example.jsonl --initial-launch 6 --duration 60
+   ```
+   - `--prompts random`（默认）：随机 token 组成的 prompt，长度和输出长度仍按 Azure 对话数据集抽样，所以吞吐和 dummy 运行可比。
+   - `--prompts 文件.jsonl`：每行一个 `{"prompt": "..."}` 或 `{"messages": [{"role": "user", "content": "..."}]}`，可选 `"max_tokens"`。`messages` 会套上 Qwen 的对话模板。第 k 个请求用第 k % N 行。
+   - worker 加载权重需要一两分钟，`--real` 时 host 默认先等 120 秒再发请求（`--init-wait` 可改）。
+4. 结果：`result/<方法>_<模式>_<布局>/generations.jsonl`，每行一个请求，包含 prompt、生成的 token id 和解码后的文字（在第一个 EOS 处截断）。`step4_parse_results.py` 照常统计性能。
+
+说明：
+- 每个请求会一直生成到预定的输出长度（worker 只在那时释放 KV cache），保存的文字在第一个 EOS 处截断。
+- 真实运行目前只支持 maxflow 调度。
+- 单节点对比真实权重和 dummy 权重的速度、检查 fp16 数值：`python tools/bench_real_weights.py`（在持有第 0 层的节点上运行）。实测前 6 层：两者速度接近，真实权重 decode 快约 5～15%（路由更集中，读的专家更少）。
+
 ## 已知限制
 
-- **只支持 dummy 权重**（和 `llama.py` 一样）。dummy 初始化下 router 的输出接近均匀，所以各专家的负载接近均匀分布，真实模型的路由可能更不均衡。
+- **默认用 dummy 权重**（和 `llama.py` 一样），真实权重见上面第 6 节。dummy 初始化下 router 的输出接近均匀，各专家负载接近均匀；真实模型的路由更集中。
 - **`fused_moe` 没有针对这个形状调优。** vLLM 0.4.0 没有 `E=128,N=768` 的调优配置，会使用默认的 kernel 参数，吞吐会偏保守。
 - **不支持专家并行。** 每个节点必须放下所持层的全部 128 个专家。张量并行按专家的 intermediate 维切分，参照 vLLM 0.4.0 的 Mixtral 写法，这部分没有测试过。
-- **第 0 层在 decode 阶段的输入始终是占位 token**（id 2）。Helix 原本就是这样设计的，不影响计算量。
+- **dummy 运行时，第 0 层在 decode 阶段的输入始终是占位 token**（id 2）。Helix 原本就是这样设计的，不影响计算量；`--real` 时是上一步真实生成的 token。

@@ -13,6 +13,7 @@ from simulator.trace_generator.trace_generator import TraceGenerator, LengthSamp
 
 import llm_sys.utils
 from llm_sys.utils import SIMULATOR_NODE_OFFSET, get_local_ip, CONFIG_BROADCAST_ADDR, FlyingQuery
+from llm_sys.real_tokens import TokenIO
 
 
 def get_schedule(scheduler: SchedulerCore,
@@ -92,11 +93,15 @@ def run_maxflow_host_online(
         duration: int,
         # result
         result_logging_dir: str,
+        # real generation (llm_sys/real_tokens.py); None = original placeholder tokens
+        token_io: TokenIO = None,
+        init_wait: float = 20,
 ) -> None:
     """
     Run host with !!![MaxFlow + Online mode]!!!.
     machine_num_dict: e.g.: {"A100": 4, "V100": 0, "L4": 6, "L4x2": 0, "T4": 6, "T4x2": 6, "T4x4": 2}
     """
+    token_io = token_io if token_io is not None else TokenIO(real=False)
     print("Initializing host with MaxFlow scheduling!")
 
     # ----------------------------------- Init Scheduler ----------------------------------- #
@@ -141,7 +146,7 @@ def run_maxflow_host_online(
     host_ip: str = get_local_ip()
     llm_sys.utils.assert_usable_local_ip(host_ip)
     llm_host.start_network_threads(CONFIG_BROADCAST_ADDR, host_ip, real_sys_config_file_name, "maxflow")
-    time.sleep(20)
+    time.sleep(init_wait)   # workers load their layers meanwhile
     print("[Python] Cluster initialization finished!")
     # -------------------------------------------------------------------------------------- #
     ground_zero = time.time()
@@ -165,6 +170,8 @@ def run_maxflow_host_online(
             expected_submit_time, input_length, output_length = trace.pop(0)
 
             # schedule the request
+            prompt_ids, input_length, output_length = token_io.make_prompt(next_query_id, input_length,
+                                                                               output_length)
             compute_node_uids, start_layers, end_layers, pipeline = get_schedule(scheduler=maxflow_scheduler,
                                                                                  input_seq_length=input_length)
 
@@ -178,7 +185,7 @@ def run_maxflow_host_online(
                 cur_query_id,  # request_id
                 input_length,  # num_tokens
                 input_length + output_length,  # max_num_tokens
-                [i for i in range(input_length)],  # token_ids
+                prompt_ids,  # token_ids
                 True,  # set_routing
                 compute_node_uids,  # server_ids
                 start_layers,  # start_layer_ids
@@ -206,7 +213,8 @@ def run_maxflow_host_online(
         # get finished requests
         now = time.time() - ground_zero
         finished_query_ids, generated_token_ids, routes, num_layers = llm_host.gather_finished_requests()
-        for query_uid in finished_query_ids:
+        for query_uid, generated_token in zip(finished_query_ids, generated_token_ids):
+            token_io.on_token(query_uid, generated_token)
             # first receive the message
             py_on_the_fly_query = flying_queries_dict[query_uid]
             if py_on_the_fly_query.processed_tokens == 0:
@@ -226,6 +234,7 @@ def run_maxflow_host_online(
             if py_on_the_fly_query.processed_tokens == max_size:
                 # not send: finished, remove from expectations
                 del flying_queries_dict[query_uid]
+                token_io.finish(query_uid)
                 release_kv_expectation(scheduler=maxflow_scheduler, input_len=py_on_the_fly_query.input_length,
                                        pipeline=py_on_the_fly_query.pipeline)
                 print(f"Query {query_uid}, finished (total_len={py_on_the_fly_query.processed_tokens})")
@@ -241,7 +250,7 @@ def run_maxflow_host_online(
                     query_uid,  # request_id
                     py_on_the_fly_query.processed_tokens,  # num_tokens (context size)
                     max_size,  # max_num_tokens
-                    [-1],  # token_ids
+                    token_io.decode_input(query_uid),  # token_ids
                     True,  # set_routing
                     py_on_the_fly_query.compute_node_uids,  # server_ids
                     py_on_the_fly_query.start_layers,  # start_layer_ids
@@ -253,6 +262,9 @@ def run_maxflow_host_online(
 
     # save logging files
     print(f"Queries still flying: {flying_queries_dict.keys()}.")
+    saved = token_io.save(result_logging_dir)
+    if saved:
+        print(f"Generated tokens / text: {saved}")
     query_routes_file_name = os.path.join(result_logging_dir, "query_route.txt")
     events_file_name = os.path.join(result_logging_dir, "events.txt")
     with open(query_routes_file_name, "w") as f:
@@ -279,11 +291,15 @@ def run_maxflow_host_offline(
         duration: int,
         # result
         result_logging_dir: str,
+        # real generation (llm_sys/real_tokens.py); None = original placeholder tokens
+        token_io: TokenIO = None,
+        init_wait: float = 20,
 ) -> None:
     """
     Run host with !!![MaxFlow + Offline mode]!!!.
     machine_num_dict: e.g.: {"A100": 4, "V100": 0, "L4": 6, "L4x2": 0, "T4": 6, "T4x2": 6, "T4x4": 2}
     """
+    token_io = token_io if token_io is not None else TokenIO(real=False)
     print("Initializing host with MaxFlow scheduling!")
 
     # ----------------------------------- Init Scheduler ----------------------------------- #
@@ -331,7 +347,7 @@ def run_maxflow_host_offline(
     host_ip: str = get_local_ip()
     llm_sys.utils.assert_usable_local_ip(host_ip)
     llm_host.start_network_threads(CONFIG_BROADCAST_ADDR, host_ip, real_sys_config_file_name, "maxflow")
-    time.sleep(20)
+    time.sleep(init_wait)   # workers load their layers meanwhile
     print("[Python] Cluster initialization finished!")
     # -------------------------------------------------------------------------------------- #
     ground_zero = time.time()
@@ -361,6 +377,8 @@ def run_maxflow_host_offline(
             expected_submit_time, input_length, output_length = initial_requests[0]
 
             # schedule the request
+            prompt_ids, input_length, output_length = token_io.make_prompt(next_query_id, input_length,
+                                                                               output_length)
             compute_node_uids, start_layers, end_layers, pipeline = get_schedule(scheduler=maxflow_scheduler,
                                                                                  input_seq_length=input_length)
 
@@ -379,7 +397,7 @@ def run_maxflow_host_offline(
                     cur_query_id,  # request_id
                     input_length,  # num_tokens
                     input_length + output_length,  # max_num_tokens
-                    [i for i in range(input_length)],  # token_ids
+                    prompt_ids,  # token_ids
                     True,  # set_routing
                     compute_node_uids,  # server_ids
                     start_layers,  # start_layer_ids
@@ -407,7 +425,8 @@ def run_maxflow_host_offline(
         # get finished requests
         now = time.time() - ground_zero
         finished_query_ids, generated_token_ids, routes, num_layers = llm_host.gather_finished_requests()
-        for query_uid in finished_query_ids:
+        for query_uid, generated_token in zip(finished_query_ids, generated_token_ids):
+            token_io.on_token(query_uid, generated_token)
             # first receive the message
             py_on_the_fly_query = flying_queries_dict[query_uid]
             if py_on_the_fly_query.processed_tokens == 0:
@@ -424,6 +443,8 @@ def run_maxflow_host_offline(
                     input_length, output_length = length_sampler.sample_length()
 
                     # schedule the request
+                    prompt_ids, input_length, output_length = token_io.make_prompt(next_query_id, input_length,
+                                                                                       output_length)
                     compute_node_uids, start_layers, end_layers, pipeline = get_schedule(scheduler=maxflow_scheduler,
                                                                                          input_seq_length=input_length)
 
@@ -439,7 +460,7 @@ def run_maxflow_host_offline(
                             cur_query_id,  # request_id
                             input_length,  # num_tokens
                             input_length + output_length,  # max_num_tokens
-                            [i for i in range(input_length)],  # token_ids
+                            prompt_ids,  # token_ids
                             True,  # set_routing
                             compute_node_uids,  # server_ids
                             start_layers,  # start_layer_ids
@@ -479,6 +500,7 @@ def run_maxflow_host_offline(
             if py_on_the_fly_query.processed_tokens == max_size:
                 # not send: finished, remove from expectations
                 del flying_queries_dict[query_uid]
+                token_io.finish(query_uid)
                 release_kv_expectation(scheduler=maxflow_scheduler, input_len=py_on_the_fly_query.input_length,
                                        pipeline=py_on_the_fly_query.pipeline)
                 print(f"Query {query_uid}, finished (total_len={py_on_the_fly_query.processed_tokens})")
@@ -491,6 +513,8 @@ def run_maxflow_host_offline(
                     input_length, output_length = length_sampler.sample_length()
 
                     # schedule the request
+                    prompt_ids, input_length, output_length = token_io.make_prompt(next_query_id, input_length,
+                                                                                       output_length)
                     compute_node_uids, start_layers, end_layers, pipeline = get_schedule(scheduler=maxflow_scheduler,
                                                                                          input_seq_length=input_length)
 
@@ -506,7 +530,7 @@ def run_maxflow_host_offline(
                             cur_query_id,  # request_id
                             input_length,  # num_tokens
                             input_length + output_length,  # max_num_tokens
-                            [i for i in range(input_length)],  # token_ids
+                            prompt_ids,  # token_ids
                             True,  # set_routing
                             compute_node_uids,  # server_ids
                             start_layers,  # start_layer_ids
@@ -545,7 +569,7 @@ def run_maxflow_host_offline(
                     query_uid,  # request_id
                     py_on_the_fly_query.processed_tokens,  # num_tokens (context size)
                     max_size,  # max_num_tokens
-                    [-1],  # token_ids
+                    token_io.decode_input(query_uid),  # token_ids
                     True,  # set_routing
                     py_on_the_fly_query.compute_node_uids,  # server_ids
                     py_on_the_fly_query.start_layers,  # start_layer_ids
@@ -557,6 +581,9 @@ def run_maxflow_host_offline(
 
     # save logging files
     print(f"Queries still flying: {flying_queries_dict.keys()}.")
+    saved = token_io.save(result_logging_dir)
+    if saved:
+        print(f"Generated tokens / text: {saved}")
     query_routes_file_name = os.path.join(result_logging_dir, "query_route.txt")
     events_file_name = os.path.join(result_logging_dir, "events.txt")
     with open(query_routes_file_name, "w") as f:

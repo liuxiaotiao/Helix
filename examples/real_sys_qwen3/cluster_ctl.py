@@ -16,6 +16,7 @@ Run from this directory, ideally inside tmux/screen (profiling takes a while).
   python cluster_ctl.py disk [--quick]         # what uses disk space on each node, what could be cleaned
   python cluster_ctl.py gpus                   # GPU memory in use + the processes holding it
   python cluster_ctl.py start-workers maxflow  # step3_start_worker.py on every worker (background)
+  python cluster_ctl.py start-workers maxflow --real   # ... with the real weights (greedy decoding)
   python cluster_ctl.py stop-workers
   python cluster_ctl.py weights --layout ilp [--clean] [--dry-run]
                                                # HF safetensors shards for each worker's layers
@@ -476,7 +477,7 @@ def cmd_bandwidth(c, rm, pairs, port, seconds, write):
 
 
 # ------------------------------------------------------------------------------------------- #
-def cmd_start_workers(c, rm, method, force=False):
+def cmd_start_workers(c, rm, method, force=False, real=False):
     busy = []
     for w in c["workers"]:
         try:
@@ -492,7 +493,8 @@ def cmd_start_workers(c, rm, method, force=False):
         log = f"logs/worker_{w['ip']}.log"
         # only the worker goes to the background ({ ... & }), so ssh returns right away
         cmd = (f"cd {shlex.quote(d)} && mkdir -p logs && {{ {_gpu_env(w)}HELIX_LOCAL_IP={w['ip']} "
-               f"setsid nohup python step3_start_worker.py {method} > {log} 2>&1 < /dev/null & }} && "
+               f"setsid nohup python step3_start_worker.py {method}{' --real' if real else ''} > {log} 2>&1 "
+               f"< /dev/null & }} && "
                f"sleep 1 && echo started")
         r = rm.run(w["ip"], cmd, timeout=60)
         status = "started" if r.returncode == 0 and "started" in r.stdout else \
@@ -821,6 +823,8 @@ def main():
     s = sub.add_parser("start-workers")
     s.add_argument("method", choices=["maxflow", "swarm", "random"])
     s.add_argument("--force", action="store_true", help="start even if some GPUs are busy")
+    s.add_argument("--real", action="store_true",
+                   help="real Qwen3 weights (cluster.json weights.dir) + greedy; host: step2 ... --real")
     sub.add_parser("gpus", help="GPU memory in use and the processes holding it, on every node")
     sub.add_parser("stop-workers")
     dk = sub.add_parser("disk", help="what uses disk space on each node and what could be cleaned (read-only)")
@@ -870,7 +874,7 @@ def main():
     elif a.cmd == "bandwidth":
         cmd_bandwidth(c, rm, a.pairs, a.port, a.seconds, a.write)
     elif a.cmd == "start-workers":
-        cmd_start_workers(c, rm, a.method, a.force)
+        cmd_start_workers(c, rm, a.method, a.force, a.real)
     elif a.cmd == "gpus":
         cmd_gpus(c, rm)
     elif a.cmd == "disk":

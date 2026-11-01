@@ -83,7 +83,7 @@ void config_broadcast(const std::string &config_broadcast_addr, const std::strin
 // 4. max_num_tokens: int, max number of tokens in the sequence
 // 5. token_ids: List[int]
 //    - for prompt, it is the token ids to parse
-//    - for decode, it should be just [-1]
+//    - for decode, it is [-1] (placeholder) or [the token generated in the previous step]
 // 6. set_routing: bool, whether to set routing
 //    - for maxflow, it must be true
 //    - for swarm and random, it must be false
@@ -146,7 +146,9 @@ void launch_request(
         Assert(token_ids.size() == num_tokens, "Token id size mismatch!");
     } else if (header.msg_type == MsgType::Decode) {
         Assert(token_ids.size() == 1, "Token id size mismatch!");
-        Assert(token_ids[0] == -1, "Token id should be -1 for decode!");
+        // -1: placeholder (original Helix); >= 0: the token generated in the previous step,
+        // embedded by the first stage (real generation, llm_sys/real_tokens.py)
+        Assert(token_ids[0] >= -1, "Token id should be -1 (placeholder) or a real token id for decode!");
     } else {
         Assert(false, "Bad message type!");
     }

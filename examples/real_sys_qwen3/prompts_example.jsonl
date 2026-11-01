@@ -1,0 +1,6 @@
+{"messages": [{"role": "user", "content": "What is the capital of France? Answer in one sentence. /no_think"}], "max_tokens": 64}
+{"messages": [{"role": "user", "content": "Write a Python function that returns the n-th Fibonacci number. /no_think"}], "max_tokens": 200}
+{"messages": [{"role": "user", "content": "Explain in three short bullet points why the sky is blue. /no_think"}], "max_tokens": 160}
+{"messages": [{"role": "user", "content": "用一句话介绍一下长城。/no_think"}], "max_tokens": 80}
+{"messages": [{"role": "user", "content": "List the first ten prime numbers. /no_think"}], "max_tokens": 64}
+{"prompt": "The three primary colors of light are", "max_tokens": 32}

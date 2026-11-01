@@ -3,6 +3,8 @@ Start one Helix worker (one GPU) for Qwen3-30B-A3B. Run on every worker machine 
 cluster.json, from this directory:
 
   python step3_start_worker.py maxflow          # or swarm | random, same as the host
+  python step3_start_worker.py maxflow --real   # real Qwen3 weights (cluster.json weights.dir),
+                                                # greedy decoding; the host must use --real too
 
 The worker finds its own IP among cluster.json's workers (or uses HELIX_LOCAL_IP), fetches its
 layers from the host, and serves them with dummy weights. On a multi-GPU machine only one GPU is
@@ -23,6 +25,9 @@ PROFILED_VRAM_USAGE = 0.8   # tools/profile_qwen3_moe.py measures KV capacity at
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("method", choices=["maxflow", "swarm", "random"])
+    ap.add_argument("--real", action="store_true",
+                    help="load the real HF weights for this node's layers (see cluster_ctl.py weights)")
+    ap.add_argument("--weights", default=None, help='weights dir (default: cluster.json "weights.dir")')
     ap.add_argument("--vram-usage", type=float, default=PROFILED_VRAM_USAGE,
                     help="vLLM gpu_memory_utilization (keep equal to the profiling value)")
     a = ap.parse_args()
@@ -45,10 +50,18 @@ def main():
     print(f"[worker] {ip} ({ip2type[ip]}), host {os.environ['HELIX_CONFIG_BROADCAST_ADDR']}, "
           f"scheduling '{a.method}'")
 
+    weights_dir = None
+    if a.real or a.weights:
+        weights_dir = os.path.expanduser(a.weights or (c.get("weights") or {}).get("dir") or "")
+        if not weights_dir or not os.path.isdir(weights_dir):
+            raise SystemExit(f"--real: weights directory {weights_dir!r} not found (cluster.json "
+                             f'"weights.dir" or --weights; download with cluster_ctl.py weights)')
+        print(f"[worker] REAL weights from {weights_dir}, greedy decoding")
+
     # import only now: llm_sys.utils reads HELIX_* at import time
     from llm_sys.worker import run_worker
     run_worker(scheduling_method=a.method, model_name=os.path.join(HERE, "model"),
-               vram_usage=a.vram_usage)
+               vram_usage=a.vram_usage, weights_dir=weights_dir)
 
 
 if __name__ == "__main__":
