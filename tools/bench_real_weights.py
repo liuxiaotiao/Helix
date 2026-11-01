@@ -74,6 +74,30 @@ def get_text(paths):
     return text
 
 
+def load_tokenizer(wdir):
+    """The checkpoint's real tokenizer (weights dir). Recent tokenizer.json files store BPE merges
+    as [a, b] pairs, which the `tokenizers` version pinned with transformers 4.40 cannot parse;
+    such files are converted to the older "a b" form in memory. Never falls back to this repo's
+    examples/real_sys_qwen3/model/tokenizer.json: that one is a placeholder (every text -> id 0)."""
+    from tokenizers import Tokenizer
+    p = os.path.join(wdir, "tokenizer.json")
+    if not os.path.exists(p):
+        raise SystemExit(f"{p} not found: rerun cluster_ctl.py weights (it downloads the tokenizer)")
+    try:
+        tok = Tokenizer.from_file(p)
+    except Exception:  # noqa: BLE001
+        obj = json.load(open(p))
+        merges = obj.get("model", {}).get("merges", [])
+        if merges and isinstance(merges[0], list):
+            obj["model"]["merges"] = [" ".join(m) for m in merges]
+        obj["model"].pop("ignore_merges", None)      # newer field, unknown to old versions
+        tok = Tokenizer.from_str(json.dumps(obj))
+    ids = tok.encode("The quick brown fox jumps over the lazy dog.").ids
+    if len(set(ids)) < 5:
+        raise SystemExit(f"{p} does not look like a real tokenizer (test sentence -> {ids})")
+    return tok
+
+
 class Corpus:
     """Hands out disjoint stretches of real token ids (wrapping around if the text runs out)."""
 
@@ -97,7 +121,6 @@ def worker(mode, layers, wdir, repeats):
     from vllm.engine.arg_utils import EngineArgs
     from llm_sys.engine.exec_engine import PipelineStageEngine
     from llm_sys.engine.hf_weights import WeightIndex, load_stage_weights
-    from tokenizers import Tokenizer
 
     S = layers[0]
     engine = PipelineStageEngine.from_engine_args(
@@ -117,9 +140,10 @@ def worker(mode, layers, wdir, repeats):
         if overflow:
             print(f"  WARNING fp16 overflow in weights (clamped): {overflow}", file=sys.stderr)
 
-    tok = Tokenizer.from_file(os.path.join(wdir if os.path.exists(os.path.join(wdir, "tokenizer.json"))
-                                           else MODEL_DIR, "tokenizer.json"))
+    tok = load_tokenizer(wdir)
     corpus = Corpus(tok.encode(get_text(ARGS.text)).ids)
+    distinct = len(set(corpus.ids[:20000]))
+    assert distinct > 500, f"text has only {distinct} distinct tokens in its first 20k: tokenizer problem?"
     res["corpus_tokens"] = len(corpus.ids)
     sp = SamplingParams(ignore_eos=True, max_tokens=100_000)
     next_rid = [1000]
@@ -268,8 +292,11 @@ def worker(mode, layers, wdir, repeats):
                                rope_theta=cfg.rope_theta, eps=cfg.rms_norm_eps)
         del W
         finite = bool(torch.isfinite(got).all())
-        rel = ((got - ref).abs().max() / ref.abs().max()).item() if finite else float("inf")
-        cos = torch.nn.functional.cosine_similarity(got, ref, dim=-1) if finite else torch.zeros(1)
+        # compare what the layer ADDS to the residual stream (attention + MoE output): the stream
+        # itself carries huge activations from earlier layers that would hide any MoE error
+        d_got, d_ref = got - x, ref - x
+        rel = ((d_got - d_ref).abs().max() / d_ref.abs().max()).item() if finite else float("inf")
+        cos = torch.nn.functional.cosine_similarity(d_got, d_ref, dim=-1) if finite else torch.zeros(1)
         # a few tokens may legitimately pick a different expert in fp16 than in fp32 (near-tied
         # router scores), so judge by the mean and by how many tokens deviate, not by the minimum
         checks.append({"layer": L, "finite": finite, "max_abs": float(got.abs().max()),
@@ -320,7 +347,7 @@ def report(dummy, real):
         print(f"  {phase:16s}{avg(dummy, 'experts_used'):13.1f}{avg(real, 'experts_used'):13.1f}"
               f"{avg(dummy, 'max_per_expert'):11.1f}{avg(real, 'max_per_expert'):11.1f}"
               f"{avg(dummy, 'pad_ratio'):10.2f}x{avg(real, 'pad_ratio'):10.2f}x")
-    print("\nReal weights, fp16 health and per-layer check against an fp32 CPU reference:")
+    print("\nReal weights, fp16 health; each layer's update (attention + MoE) vs. an fp32 CPU reference:")
     for c in real["numerics"]:
         low = c["frac_tokens_cos_below_0.99"]
         good = c["finite"] and c["mean_cos"] > 0.999 and low < 0.02

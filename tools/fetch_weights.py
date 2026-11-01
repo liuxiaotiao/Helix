@@ -221,12 +221,17 @@ def main():
     for f in SMALL_FILES:
         if a.dry_run and f not in ("config.json", "model.safetensors.index.json"):
             continue
+        required = f in ("config.json", "model.safetensors.index.json", "tokenizer.json")
         try:
-            download(a.repo, a.revision, f, meta_dir, retries=3 if f in ("config.json", "model.safetensors.index.json") else 1)
+            if a.curl:
+                curl_download(a.repo, a.revision, f, meta_dir, attempts=5 if required else 1)
+            else:
+                download(a.repo, a.revision, f, meta_dir, retries=3 if required else 1)
         except Exception as e:  # noqa: BLE001
-            if f in ("config.json", "model.safetensors.index.json"):
+            if required:
                 raise SystemExit(f"cannot download {f} from {a.repo}: {e}\n"
                                  f"(no internet to huggingface.co? set HF_ENDPOINT to a mirror)")
+            print(f"[weights] optional {f} not downloaded ({type(e).__name__})", flush=True)
     index = json.load(open(os.path.join(meta_dir, "model.safetensors.index.json")))
     cfg = json.load(open(os.path.join(meta_dir, "config.json")))
     total_layers = int(cfg.get("num_hidden_layers", 48))
