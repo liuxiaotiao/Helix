@@ -88,24 +88,32 @@ def download(repo, revision, filename, local_dir, retries=5):
             time.sleep(wait)
 
 
-def clean_dir(d):
+def dir_size(d):
+    total = 0
+    for root, _, files in os.walk(d):
+        for f in files:
+            p = os.path.join(root, f)
+            if not os.path.islink(p):
+                total += os.path.getsize(p)
+    return total
+
+
+def clean_dir(d, dry_run=False):
+    """delete everything inside d; returns the bytes freed (or that would be freed)."""
     real = os.path.realpath(d)
     home = os.path.realpath(os.path.expanduser("~"))
     if real in ("/", home) or real.count(os.sep) < 2:
         raise SystemExit(f"refusing to clean {real}")
     if not os.path.isdir(real):
         return 0
-    freed = 0
-    for name in os.listdir(real):
-        p = os.path.join(real, name)
-        if os.path.isdir(p) and not os.path.islink(p):
-            for root, _, files in os.walk(p):
-                freed += sum(os.path.getsize(os.path.join(root, f)) for f in files
-                             if not os.path.islink(os.path.join(root, f)))
-            shutil.rmtree(p)
-        else:
-            freed += 0 if os.path.islink(p) else os.path.getsize(p)
-            os.remove(p)
+    freed = dir_size(real)
+    if not dry_run:
+        for name in os.listdir(real):
+            p = os.path.join(real, name)
+            if os.path.isdir(p) and not os.path.islink(p):
+                shutil.rmtree(p)
+            else:
+                os.remove(p)
     return freed
 
 
@@ -130,11 +138,15 @@ def main():
     d = os.path.abspath(os.path.expanduser(a.dir))
     print(f"[weights] {os.uname().nodename}: {a.repo}@{a.revision} -> {d}  "
           f"layers={a.layers if not a.all else 'ALL'}", flush=True)
+    freed_by_clean = 0
     if a.clean:
+        freed_by_clean = clean_dir(d, dry_run=a.dry_run)
         if a.dry_run:
-            print(f"[weights] (dry run) would delete everything inside {d}")
+            print(f"[weights] (dry run) would delete everything inside {d} ({gb(freed_by_clean)})")
+            # a real run cleans first, so that space counts as free
         else:
-            print(f"[weights] cleaned {d}: freed {gb(clean_dir(d))}", flush=True)
+            print(f"[weights] cleaned {d}: freed {gb(freed_by_clean)}", flush=True)
+            freed_by_clean = 0
     # a dry run reads the index into a temporary directory and leaves --dir untouched
     import tempfile
     meta_dir = tempfile.mkdtemp(prefix="helix_weights_") if a.dry_run else d
@@ -165,9 +177,10 @@ def main():
         else:
             todo.append(s)
     need = sum(sizes[s] or 4_100_000_000 for s in todo)   # unknown size: ~ a typical 4 GB shard
-    free = shutil.disk_usage(d).free
+    free = shutil.disk_usage(d).free + freed_by_clean
     print(f"[weights] {len(shards)} shard(s) for these layers: {len(shards) - len(todo)} present "
-          f"({gb(have)}), {len(todo)} to download ({gb(need)}); free disk {gb(free)}", flush=True)
+          f"({gb(have)}), {len(todo)} to download ({gb(need)}); free disk {gb(free)}"
+          f"{' after cleaning' if freed_by_clean else ''}", flush=True)
     for s in shards:
         print(f"    {s}  {gb(sizes[s]) if sizes[s] else '?'}{'' if s in todo else '  (present)'}")
     if need + a.reserve_gb * 1e9 > free:
