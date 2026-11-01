@@ -1,0 +1,112 @@
+machine_id: 0
+ip_address: 192.168.3.4
+in_nodes: 3 5
+out_nodes: 7 14
+start_layer: -1
+end_layer: -1
+
+machine_id: 1
+ip_address: 192.168.3.4
+in_nodes: 2
+out_nodes: 8 15
+start_layer: 21
+end_layer: 30
+
+machine_id: 2
+ip_address: 192.168.3.2
+in_nodes: 4 13
+out_nodes: 1
+start_layer: 12
+end_layer: 21
+
+machine_id: 3
+ip_address: 192.168.1.2
+in_nodes: 6 9
+out_nodes: 0
+start_layer: 42
+end_layer: 48
+
+machine_id: 4
+ip_address: 192.168.3.3
+in_nodes: 7 14
+out_nodes: 2 12
+start_layer: 6
+end_layer: 12
+
+machine_id: 5
+ip_address: 192.168.3.5
+in_nodes: 6 9
+out_nodes: 0
+start_layer: 42
+end_layer: 48
+
+machine_id: 6
+ip_address: 192.168.1.3
+in_nodes: 8 15
+out_nodes: 3 5
+start_layer: 36
+end_layer: 42
+
+machine_id: 7
+ip_address: 192.168.4.2
+in_nodes: 0
+out_nodes: 4 13
+start_layer: 0
+end_layer: 6
+
+machine_id: 8
+ip_address: 192.168.1.6
+in_nodes: 1 10
+out_nodes: 6 9
+start_layer: 30
+end_layer: 36
+
+machine_id: 9
+ip_address: 192.168.4.3
+in_nodes: 8 15
+out_nodes: 3 5
+start_layer: 36
+end_layer: 42
+
+machine_id: 10
+ip_address: 192.168.1.5
+in_nodes: 11
+out_nodes: 8 15
+start_layer: 24
+end_layer: 30
+
+machine_id: 11
+ip_address: 192.168.1.4
+in_nodes: 12
+out_nodes: 10
+start_layer: 18
+end_layer: 24
+
+machine_id: 12
+ip_address: 192.168.2.2
+in_nodes: 4 13
+out_nodes: 11
+start_layer: 12
+end_layer: 18
+
+machine_id: 13
+ip_address: 192.168.2.3
+in_nodes: 7 14
+out_nodes: 2 12
+start_layer: 6
+end_layer: 12
+
+machine_id: 14
+ip_address: 192.168.2.4
+in_nodes: 0
+out_nodes: 4 13
+start_layer: 0
+end_layer: 6
+
+machine_id: 15
+ip_address: 192.168.4.4
+in_nodes: 1 10
+out_nodes: 6 9
+start_layer: 30
+end_layer: 36
+

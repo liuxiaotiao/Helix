@@ -1,0 +1,36 @@
+{
+  "machine_name": "RTX6000",
+  "placeholder": false,
+  "max_num_layers": 9,
+  "block_size": 16,
+  "kv_cache_blocks": {
+    "1": 496118,
+    "2": 458086,
+    "3": 420054,
+    "4": 382022,
+    "5": 343990,
+    "6": 305958,
+    "7": 267926,
+    "8": 229894,
+    "9": 191862
+  },
+  "prompt_max_requests": 2,
+  "decode_max_tokens": 256,
+  "profiling": {
+    "gpu_name": "Quadro RTX 6000",
+    "gpu_total_mem_gb": 23.6,
+    "date": "2026-10-31T23:55:17",
+    "engine": "Helix llm_sys/engine (vLLM 0.4.0.post1), dummy weights, fp16, enforce_eager",
+    "gpu_memory_utilization": 0.8,
+    "timing_layer": 23,
+    "decode_context_len": 870,
+    "repeats": 5,
+    "decode_context_max_drift": 93,
+    "kv_measured_points": {
+      "1": 496118,
+      "5": 343990,
+      "9": 191862
+    },
+    "kv_measured_with_layers": "[0, k): includes the embedding -> conservative"
+  }
+}

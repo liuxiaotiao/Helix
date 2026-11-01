@@ -1,0 +1,36 @@
+{
+  "machine_name": "A30",
+  "placeholder": false,
+  "max_num_layers": 9,
+  "block_size": 16,
+  "kv_cache_blocks": {
+    "1": 540550,
+    "2": 502518,
+    "3": 464486,
+    "4": 426454,
+    "5": 388422,
+    "6": 350390,
+    "7": 312358,
+    "8": 274326,
+    "9": 236294
+  },
+  "prompt_max_requests": 2,
+  "decode_max_tokens": 256,
+  "profiling": {
+    "gpu_name": "NVIDIA A30",
+    "gpu_total_mem_gb": 25.34,
+    "date": "2026-10-31T23:55:17",
+    "engine": "Helix llm_sys/engine (vLLM 0.4.0.post1), dummy weights, fp16, enforce_eager",
+    "gpu_memory_utilization": 0.8,
+    "timing_layer": 23,
+    "decode_context_len": 870,
+    "repeats": 5,
+    "decode_context_max_drift": 93,
+    "kv_measured_points": {
+      "1": 540550,
+      "5": 388422,
+      "9": 236294
+    },
+    "kv_measured_with_layers": "[0, k): includes the embedding -> conservative"
+  }
+}

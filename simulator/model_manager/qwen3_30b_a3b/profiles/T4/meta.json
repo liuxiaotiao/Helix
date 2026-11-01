@@ -1,0 +1,33 @@
+{
+  "machine_name": "T4",
+  "placeholder": false,
+  "max_num_layers": 6,
+  "block_size": 16,
+  "kv_cache_blocks": {
+    "1": 302606,
+    "2": 264577,
+    "3": 226574,
+    "4": 188519,
+    "5": 150490,
+    "6": 112462
+  },
+  "prompt_max_requests": 2,
+  "decode_max_tokens": 256,
+  "profiling": {
+    "gpu_name": "Tesla T4",
+    "gpu_total_mem_gb": 15.66,
+    "date": "2026-10-31T23:55:20",
+    "engine": "Helix llm_sys/engine (vLLM 0.4.0.post1), dummy weights, fp16, enforce_eager",
+    "gpu_memory_utilization": 0.8,
+    "timing_layer": 23,
+    "decode_context_len": 870,
+    "repeats": 5,
+    "decode_context_max_drift": 93,
+    "kv_measured_points": {
+      "1": 302606,
+      "3": 226574,
+      "6": 112462
+    },
+    "kv_measured_with_layers": "[0, k): includes the embedding -> conservative"
+  }
+}
