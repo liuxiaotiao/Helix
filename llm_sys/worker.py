@@ -20,10 +20,23 @@ import llm_sys.engine.qwen3_moe  # registers Qwen3MoeForCausalLM (e.g. Qwen3-30B
 import llm_sys.utils as utils
 
 
+def swap_space_gib() -> int:
+    """CPU swap space (GiB, pinned host memory for preempted KV blocks). The original code used
+    32 GiB, which vLLM rejects on machines with < ~46 GiB RAM (it refuses > 70% of RAM). Default:
+    min(32, 30% of this machine's RAM); override with HELIX_SWAP_SPACE_GB."""
+    import os
+    if os.environ.get("HELIX_SWAP_SPACE_GB"):
+        return max(0, int(float(os.environ["HELIX_SWAP_SPACE_GB"])))
+    total_gib = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1 << 30)
+    return max(1, min(32, int(total_gib * 0.3)))
+
+
 def init_engine(layer_ids, model_name, vram_usage=0.8):
+    swap = swap_space_gib()
+    print(f"[worker] CPU swap space: {swap} GiB", flush=True)
     engine_args = EngineArgs(model=model_name, block_size=16,
                              load_format="dummy", enforce_eager=True,
-                             swap_space=32, max_num_batched_tokens=4096,
+                             swap_space=swap, max_num_batched_tokens=4096,
                              gpu_memory_utilization=vram_usage)
 
     engine = PipelineStageEngine.from_engine_args(engine_args, layer_ids)
