@@ -707,7 +707,7 @@ def cmd_weights_status(c, rm, wdir, only, watch):
 
 
 def cmd_weights(c, rm, layout, wdir, repo, clean, dry_run, every, only, max_parallel, interval=15,
-                no_xet=False):
+                no_xet=False, curl=False):
     """tools/fetch_weights.py on every worker: the HF shards for that worker's layers."""
     wcfg = c.get("weights", {})
     wdir = _weights_dir(c, wdir)
@@ -729,6 +729,7 @@ def cmd_weights(c, rm, layout, wdir, repo, clean, dry_run, every, only, max_para
         args += ["--all"] if every else [x for s, e in ranges[ip] for x in ("--layers", str(s), str(e))]
         args += (["--clean"] if clean else []) + (["--dry-run"] if dry_run else [])
         args += ["--no-xet"] if no_xet else []
+        args += ["--curl"] if curl else []
         cmd = (f"cd {shlex.quote(rm.repo)} && {env + ' ' if env else ''}"
                f"python tools/fetch_weights.py {' '.join(args)}")
         jobs.append((ip, cmd, os.path.join(LOG_DIR, f"weights_{ip}.log")))
@@ -840,6 +841,8 @@ def main():
     wt.add_argument("--interval", type=float, default=15, help="seconds between progress refreshes")
     wt.add_argument("--no-xet", action="store_true",
                     help="plain HTTPS downloads instead of HF Xet storage (when Xet transfers fail)")
+    wt.add_argument("--curl", action="store_true",
+                    help="download shards with curl on the nodes (resumable; bypasses huggingface_hub)")
     ws = sub.add_parser("weights-status", help="download progress of `weights` on every node (any terminal)")
     ws.add_argument("--dir", default=None)
     ws.add_argument("--nodes", nargs="*")
@@ -876,7 +879,7 @@ def main():
         sys.exit(0 if cmd_net_test(c, rm, a.layout, a.duration) else 1)
     elif a.cmd == "weights":
         sys.exit(0 if cmd_weights(c, rm, a.layout, a.dir, a.repo, a.clean, a.dry_run, a.all, a.nodes,
-                                  a.max_parallel, a.interval, a.no_xet) else 1)
+                                  a.max_parallel, a.interval, a.no_xet, a.curl) else 1)
     elif a.cmd == "weights-status":
         cmd_weights_status(c, rm, a.dir, a.nodes, a.watch)
     else:

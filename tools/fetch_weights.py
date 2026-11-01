@@ -125,6 +125,36 @@ def dir_size(d):
     return total
 
 
+def curl_download(repo, revision, filename, local_dir, expected_size=None, attempts=30):
+    """Plain curl into <file>.part (resumable with -C -, aborted and resumed when the transfer
+    stalls below 1 MB/s for 60 s), then renamed. Used with --curl: it only needs the CDN to be
+    reachable with curl, nothing from the huggingface_hub download stack."""
+    import subprocess
+    endpoint = os.environ.get("HF_ENDPOINT", "https://huggingface.co").rstrip("/")
+    url = f"{endpoint}/{repo}/resolve/{revision}/{filename}"
+    dst = os.path.join(local_dir, filename)
+    part = dst + ".part"
+    cmd = ["curl", "-fsSL", "--connect-timeout", "30", "--speed-limit", "1000000", "--speed-time", "60",
+           "-C", "-", "-o", part, url]
+    if os.environ.get("HF_TOKEN"):
+        cmd[1:1] = ["-H", f"Authorization: Bearer {os.environ['HF_TOKEN']}"]
+    for attempt in range(1, attempts + 1):
+        if expected_size is not None and os.path.exists(part) and os.path.getsize(part) >= expected_size:
+            break
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0:
+            break
+        have = os.path.getsize(part) if os.path.exists(part) else 0
+        if attempt == attempts:
+            raise RuntimeError(f"curl failed for {filename} (exit {r.returncode}): {r.stderr.strip()[-300:]}")
+        wait = min(60, 5 * attempt)
+        print(f"  curl exit {r.returncode} for {filename} at {have / 1e9:.2f} GB "
+              f"({r.stderr.strip()[-150:]}); resuming in {wait}s ({attempt}/{attempts - 1})", flush=True)
+        time.sleep(wait)
+    os.replace(part, dst)
+    return dst
+
+
 def clean_dir(d, dry_run=False):
     """delete everything inside d; returns the bytes freed (or that would be freed)."""
     real = os.path.realpath(d)
@@ -162,6 +192,8 @@ def main():
     ap.add_argument("--no-xet", action="store_true",
                     help="plain HTTPS download instead of HF's Xet storage (use when Xet transfers fail)")
     ap.add_argument("--no-verify", action="store_true", help="skip the sha256 check of downloaded shards")
+    ap.add_argument("--curl", action="store_true",
+                    help="download the shards with curl (resumable) instead of huggingface_hub")
     a = ap.parse_args()
     if a.no_xet:   # must be set before huggingface_hub is imported (it reads it at import time)
         os.environ["HF_HUB_DISABLE_XET"] = "1"
@@ -225,7 +257,7 @@ def main():
     # partial downloads (<dir>/.cache/huggingface/download/*.incomplete) are resumed by the next
     # run, but a partial file written by the Xet client must not be continued by a plain HTTP
     # download (or vice versa): drop them when the download mode changed
-    mode = "http" if os.environ.get("HF_HUB_DISABLE_XET") else "xet"
+    mode = "curl" if a.curl else "http" if os.environ.get("HF_HUB_DISABLE_XET") else "xet"
     mode_file = os.path.join(d, ".helix_download_mode")
     old_mode = open(mode_file).read().strip() if os.path.exists(mode_file) else None
     if old_mode and old_mode != mode:
@@ -258,7 +290,10 @@ def main():
         for k, s in enumerate(todo, 1):
             save_progress(current=s)
             t = time.time()
-            download(a.repo, a.revision, s, d)
+            if a.curl:
+                curl_download(a.repo, a.revision, s, d, expected_size=sizes[s])
+            else:
+                download(a.repo, a.revision, s, d)
             sz = os.path.getsize(os.path.join(d, s))
             if sizes[s] is not None and sz != sizes[s]:
                 os.remove(os.path.join(d, s))
