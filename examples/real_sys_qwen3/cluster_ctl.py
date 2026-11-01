@@ -676,7 +676,7 @@ def print_weights_table(ips, polled, prev, interval, status=None):
         state = prog.get("state", "?")
         if st == "FAIL" or state == "failed":
             state = "FAILED"
-        pct = 100.0 * done / need if need else 100.0
+        pct = 100.0 * done / need if need else (100.0 if state == "done" else 0.0)
         eta = _dur((need - done) / speed) if state == "downloading" and speed > 1e5 else ""
         cur = (prog.get("current") or "").replace(".safetensors", "")
         print(f"  {ip:15s} {state:11s} {done / 1e9:7.1f}/{need / 1e9:5.1f} GB {pct:5.0f} "

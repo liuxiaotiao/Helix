@@ -28,6 +28,7 @@ SMALL_FILES = ["config.json", "generation_config.json", "model.safetensors.index
                "tokenizer.json", "tokenizer_config.json", "vocab.json", "merges.txt",
                "special_tokens_map.json", "LICENSE", "README.md"]
 MANIFEST = ".helix_weights.json"
+VERIFIED = ".helix_verified.json"            # shard -> sha256 already checked on this node
 PROGRESS = ".helix_weights_progress.json"   # read by cluster_ctl.py weights / weights-status
 
 
@@ -232,11 +233,35 @@ def main():
     wm = index["weight_map"]
     shards = sorted(set(wm.values())) if a.all else shards_for(wm, needed_prefixes(a.layers, total_layers))
 
+    if not a.dry_run:   # replace a stale progress file (e.g. "failed" from an earlier run)
+        with open(os.path.join(d, PROGRESS), "w") as f:
+            json.dump({"state": "checking", "need": 0, "base": 0, "shards_total": len(shards),
+                       "shards_done": 0, "current": "checking files already present",
+                       "started": time.time(), "updated": time.time()}, f)
     sizes = remote_sizes(a.repo, a.revision, shards)
+    shas = {} if a.no_verify else remote_sha256(a.repo, a.revision, shards)
+    vfile = os.path.join(d, VERIFIED)
+    verified = json.load(open(vfile)) if os.path.exists(vfile) else {}
+
+    def mark_verified(s):
+        verified[s] = shas.get(s)
+        with open(vfile, "w") as f:
+            json.dump(verified, f, indent=1)
+
     todo, have = [], 0
     for s in shards:
         p = os.path.join(d, s)
         if os.path.exists(p) and sizes[s] is not None and os.path.getsize(p) == sizes[s]:
+            # a shard left by an earlier (possibly interrupted or mixed Xet/HTTP) run: check it
+            # once before trusting it
+            if shas.get(s) and verified.get(s) != shas[s] and not a.dry_run:
+                print(f"[weights] verifying present {s} ...", flush=True)
+                if sha256_of(p) != shas[s]:
+                    print(f"[weights] {s}: sha256 mismatch, deleting and downloading again", flush=True)
+                    os.remove(p)
+                    todo.append(s)
+                    continue
+                mark_verified(s)
             have += sizes[s]
         else:
             todo.append(s)
@@ -271,7 +296,6 @@ def main():
     with open(mode_file, "w") as f:
         f.write(mode)
     print(f"[weights] download mode: {mode}", flush=True)
-    shas = {} if a.no_verify else remote_sha256(a.repo, a.revision, todo)
 
     # progress file for `cluster_ctl.py weights` / `weights-status`: bytes downloaded so far =
     # size of the directory (partial files included) minus `base`
@@ -301,6 +325,8 @@ def main():
             if shas.get(s):
                 save_progress(current=s + " (sha256 check)")
                 got = sha256_of(os.path.join(d, s))
+                if got == shas[s]:
+                    mark_verified(s)
                 if got != shas[s]:
                     os.remove(os.path.join(d, s))
                     raise SystemExit(f"{s}: sha256 mismatch (deleted; rerun to retry)")
