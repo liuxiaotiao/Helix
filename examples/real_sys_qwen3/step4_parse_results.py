@@ -26,6 +26,28 @@ def main():
     ap.add_argument("--finish", type=float, default=300)
     a = ap.parse_args()
 
+    # sanity check first: the original parser crashes (IndexError) when nothing came back
+    events_file = os.path.join(a.result_dir, "events.txt")
+    with open(events_file) as f:
+        events = [eval(line) for line in f if line.strip()]
+    kinds = {}
+    for e in events:
+        kinds[(e[2], e[3])] = kinds.get((e[2], e[3]), 0) + 1
+    last_t = max((e[0] for e in events), default=0)
+    dec_in = [e[0] for e in events if e[2] == "in" and e[3] == "decode"]
+    in_window = [t for t in dec_in if a.warm_up <= t <= a.finish]
+    print(f"{events_file}: {len(events)} events, last at t={last_t:.1f}s; "
+          + ", ".join(f"{k[1]} {k[0]}={v}" for k, v in sorted(kinds.items())))
+    if len(in_window) < 2:
+        print("Decode results received back at the host, per 30 s:")
+        for t0 in range(0, int(max(last_t, a.finish)) + 30, 30):
+            n = sum(1 for t in dec_in if t0 <= t < t0 + 30)
+            print(f"  t={t0:4d}-{t0 + 30:<4d}s  {n}")
+        raise SystemExit(f"Only {len(in_window)} decode results came back between t={a.warm_up:g}s and "
+                         f"t={a.finish:g}s, so there is nothing to measure. If they stop at some point, a "
+                         f"worker most likely died or hung then: check logs/worker_<ip>.log on the nodes. "
+                         f"If the run was short, lower --warm-up / --finish.")
+
     spec = importlib.util.spec_from_file_location(
         "real_sys_step4", os.path.join(REPO, "examples", "real_sys", "step4_parse_results.py"))
     mod = importlib.util.module_from_spec(spec)

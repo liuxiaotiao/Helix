@@ -56,6 +56,9 @@ SYNC_EXCLUDES = [".git", "./llm_sys/comm/build", "__pycache__", "*.egg-info", "*
                  "./examples/real_sys_qwen3/layouts", "./examples/real_sys_qwen3/deploy"]
 # repo-relative locations (the same on every node)
 PROFILE_REL = "simulator/model_manager/qwen3_30b_a3b/profiles"
+# where `profile` leaves its results on the profiled node: OUTSIDE the repo, so a git checkout on
+# that node (e.g. the control node, when it is also a worker) never gets untracked files
+NODE_PROFILE_DIR = "$HOME/.helix/profiles"
 EXAMPLE_REL = "examples/real_sys_qwen3"
 PLAN_REL = [f"{EXAMPLE_REL}/cluster.json", f"{EXAMPLE_REL}/config", f"{EXAMPLE_REL}/layouts",
             f"{EXAMPLE_REL}/deploy", PROFILE_REL]
@@ -263,12 +266,15 @@ def cmd_check(c, rm):
 
 # ------------------------------------------------------------------------------------------- #
 def fetch_profile(rm, ip, t):
-    """tar stream of <repo>/PROFILE_REL/<t> on node ip, or None if that node has no such profile."""
-    remote = f"{rm.repo}/{PROFILE_REL}"
-    r = subprocess.run(rm.argv(ip, f"test -f {shlex.quote(remote)}/{shlex.quote(t)}/meta.json && "
-                                   f"tar -C {shlex.quote(remote)} -cf - {shlex.quote(t)}", setup=False),
-                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
-    return r.stdout if r.returncode == 0 and r.stdout else None
+    """tar stream of the profile <t> on node ip (~/.helix/profiles/<t>, or, from older runs,
+    <repo>/PROFILE_REL/<t>), or None if that node has none."""
+    for remote in (f'"{NODE_PROFILE_DIR}"', shlex.quote(f"{rm.repo}/{PROFILE_REL}")):
+        r = subprocess.run(rm.argv(ip, f"test -f {remote}/{shlex.quote(t)}/meta.json && "
+                                       f"tar -C {remote} -cf - {shlex.quote(t)}", setup=False),
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL)
+        if r.returncode == 0 and r.stdout:
+            return r.stdout
+    return None
 
 
 def cmd_profile(c, rm, types, force, extra, fetch):
@@ -305,7 +311,7 @@ def cmd_profile(c, rm, types, force, extra, fetch):
 
     procs = {}
     for t, w in chosen.items():
-        out = f"{rm.repo}/{PROFILE_REL}"     # kept on the profiled node, inside its repo copy
+        out = f'"{NODE_PROFILE_DIR}"'          # kept on the profiled node, outside its repo copy
         flags = " --force" if force else ""
         vram = c.get("machine_types", {}).get(t, {}).get("vram_gb")
         if vram is None and t not in nominal:
@@ -315,7 +321,7 @@ def cmd_profile(c, rm, types, force, extra, fetch):
         if vram is not None:
             flags += f" --vram-gb {vram}"
         cmd = (f"cd {shlex.quote(rm.repo)} && {_gpu_env(w)}python tools/profile_qwen3_moe.py "
-               f"--machine {shlex.quote(t)} --out {shlex.quote(out)}{flags} {extra}")
+               f"--machine {shlex.quote(t)} --out {out}{flags} {extra}")
         log = os.path.join(LOG_DIR, f"profile_{t}_{w['ip']}.log")
         procs[t] = (w, rm.popen(w["ip"], cmd, log), log)
         print(f"[run ] {t} on {w['ip']}  (log: {os.path.relpath(log, HERE)})")
@@ -340,7 +346,7 @@ def cmd_profile(c, rm, types, force, extra, fetch):
                 failed.append(t)
                 print(f"[FAIL] {t}: no profile written on {w['ip']}, see {log}")
                 continue
-            where = f"{w['ip']}:{rm.repo}/{PROFILE_REL}/{t}"
+            where = f"{w['ip']}:~/.helix/profiles/{t}"
             if fetch and not rm.shared_fs:
                 subprocess.run(["tar", "-C", local_dir, "-xf", "-"], input=data, check=True)
                 where += f"  (copy here: {os.path.join(local_dir, t)})"
