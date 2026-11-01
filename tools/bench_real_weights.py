@@ -241,16 +241,26 @@ def worker(mode, layers, wdir, repeats):
     # numeric health + fp32 reference per layer (real run): capture each layer's input/output
     captured = {}
 
-    def hook(L):
-        def fn(module, args, kwargs, output):
+    # the INPUT must be copied before the layer runs: vLLM's fused residual-add RMSNorm writes
+    # into the layer's input tensor in place (harmless in Helix: that tensor is a fresh
+    # concatenation of the batch, never reused), so reading it afterwards gives input + attention
+    def pre_hook(L):
+        def fn(module, args, kwargs):
             if recording[0] == "prompt-check":
                 inp = kwargs.get("hidden_states")
                 if inp is None:
                     inp = module.get_input_embeddings(kwargs["input_ids"])
-                captured[L] = (inp.detach().float().cpu(), output.detach().float().cpu())
+                captured[L] = [inp.detach().to("cpu", dtype=torch.float32, copy=True), None]
         return fn
 
-    handles = [runner.models[L].register_forward_hook(hook(L), with_kwargs=True) for L in layers]
+    def hook(L):
+        def fn(module, args, kwargs, output):
+            if recording[0] == "prompt-check":
+                captured[L][1] = output.detach().float().cpu()
+        return fn
+
+    handles = [runner.models[L].register_forward_pre_hook(pre_hook(L), with_kwargs=True) for L in layers]
+    handles += [runner.models[L].register_forward_hook(hook(L), with_kwargs=True) for L in layers]
     recording[0] = "prompt-check"
     add(256)
     run_layers()
@@ -325,6 +335,18 @@ def mean_layers(d):
     return statistics.mean(float(v) for v in d.values())
 
 
+def print_numerics(real):
+    print(f"\n{real['gpu']}, real weights, fp16 health; each layer's update (attention + MoE) vs. an "
+          f"fp32 CPU reference:")
+    for c in real["numerics"]:
+        low = c["frac_tokens_cos_below_0.99"]
+        good = c["finite"] and c["mean_cos"] > 0.999 and low < 0.02
+        print(f"  {'ok ' if good else 'BAD'} layer {c['layer']:2d}: finite={c['finite']}, max|x|={c['max_abs']:9.1f}, "
+              f"mean_cos={c['mean_cos']:.5f}, min_cos={c['min_cos']:.4f}, tokens off (<0.99): {100 * low:.1f}%")
+    overflow = {k: v for s in real.get("load", []) for k, v in s["fp16_overflow"].items()}
+    print(f"  weights beyond fp16 range: {overflow or 'none'}")
+
+
 def report(dummy, real):
     print(f"\n=== {real['gpu']}, layers {real['layers'][0]}..{real['layers'][-1]}, real text "
           f"({real['corpus_tokens']} tokens) ===")
@@ -347,14 +369,7 @@ def report(dummy, real):
         print(f"  {phase:16s}{avg(dummy, 'experts_used'):13.1f}{avg(real, 'experts_used'):13.1f}"
               f"{avg(dummy, 'max_per_expert'):11.1f}{avg(real, 'max_per_expert'):11.1f}"
               f"{avg(dummy, 'pad_ratio'):10.2f}x{avg(real, 'pad_ratio'):10.2f}x")
-    print("\nReal weights, fp16 health; each layer's update (attention + MoE) vs. an fp32 CPU reference:")
-    for c in real["numerics"]:
-        low = c["frac_tokens_cos_below_0.99"]
-        good = c["finite"] and c["mean_cos"] > 0.999 and low < 0.02
-        print(f"  {'ok ' if good else 'BAD'} layer {c['layer']:2d}: finite={c['finite']}, max|x|={c['max_abs']:9.1f}, "
-              f"mean_cos={c['mean_cos']:.5f}, min_cos={c['min_cos']:.4f}, tokens off (<0.99): {100 * low:.1f}%")
-    overflow = {k: v for s in real.get("load", []) for k, v in s["fp16_overflow"].items()}
-    print(f"  weights beyond fp16 range: {overflow or 'none'}")
+    print_numerics(real)
     p = [r for r in rows if r[0] == "prompt"]
     d = [r for r in rows if r[0] == "decode"]
     print(f"\nsummary: prompt real/dummy {statistics.mean(r[3] / r[2] for r in p):.2f}x, "
@@ -408,6 +423,8 @@ def main():
         json.dump(results, f, indent=1)
     if len(results) == 2:
         report(results["dummy"], results["real"])
+    elif "real" in results:
+        print_numerics(results["real"])
     print(f"\nraw results: {out}")
 
 
