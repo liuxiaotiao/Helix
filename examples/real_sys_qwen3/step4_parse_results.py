@@ -36,14 +36,20 @@ def main():
     last_t = max((e[0] for e in events), default=0)
     dec_in = [e[0] for e in events if e[2] == "in" and e[3] == "decode"]
     in_window = [t for t in dec_in if a.warm_up <= t <= a.finish]
+    prompt_in_window = [e for e in events if e[2] == "in" and e[3] == "prompt" and a.warm_up <= e[0] <= a.finish]
     print(f"{events_file}: {len(events)} events, last at t={last_t:.1f}s; "
           + ", ".join(f"{k[1]} {k[0]}={v}" for k, v in sorted(kinds.items())))
-    if len(in_window) < 2:
+    stuck = kinds.get(("out", "prompt"), 0) - kinds.get(("in", "prompt"), 0)
+    if stuck > 0 and last_t < a.finish:
+        print(f"WARNING: {stuck} prompts never came back and nothing arrived after t={last_t:.1f}s: "
+              f"a worker on their paths probably died (check `DEAD` / Traceback in logs/worker_<ip>.log).")
+    if len(in_window) < 2 or not prompt_in_window:
         print("Decode results received back at the host, per 30 s:")
         for t0 in range(0, int(max(last_t, a.finish)) + 30, 30):
             n = sum(1 for t in dec_in if t0 <= t < t0 + 30)
             print(f"  t={t0:4d}-{t0 + 30:<4d}s  {n}")
-        raise SystemExit(f"Only {len(in_window)} decode results came back between t={a.warm_up:g}s and "
+        raise SystemExit(f"{len(prompt_in_window)} prompt and {len(in_window)} decode results came back "
+                         f"between t={a.warm_up:g}s and "
                          f"t={a.finish:g}s, so there is nothing to measure. If they stop at some point, a "
                          f"worker most likely died or hung then: check logs/worker_<ip>.log on the nodes. "
                          f"If the run was short, lower --warm-up / --finish.")

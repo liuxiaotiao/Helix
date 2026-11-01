@@ -22,18 +22,30 @@ import llm_sys.utils as utils
 
 def swap_space_gib() -> int:
     """CPU swap space (GiB, pinned host memory for preempted KV blocks). The original code used
-    32 GiB, which vLLM rejects on machines with < ~46 GiB RAM (it refuses > 70% of RAM). Default:
-    min(32, 30% of this machine's RAM); override with HELIX_SWAP_SPACE_GB."""
+    32 GiB, which vLLM rejects on machines with < ~46 GiB RAM (it refuses > 70% of RAM), and the
+    pinned allocation fails ("CUDA error: invalid argument") when that much RAM is not actually
+    free. It is only touched when the GPU KV cache overflows, which the max-flow scheduler avoids.
+    Default: min(8, 30% of RAM, 1/3 of currently available RAM), at least 1;
+    override with HELIX_SWAP_SPACE_GB."""
     import os
     if os.environ.get("HELIX_SWAP_SPACE_GB"):
         return max(0, int(float(os.environ["HELIX_SWAP_SPACE_GB"])))
     total_gib = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1 << 30)
-    return max(1, min(32, int(total_gib * 0.3)))
+    avail_gib = total_gib
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    avail_gib = int(line.split()[1]) / (1 << 20)
+                    break
+    except OSError:
+        pass
+    return max(1, min(8, int(total_gib * 0.3), int(avail_gib / 3)))
 
 
 def init_engine(layer_ids, model_name, vram_usage=0.8):
     swap = swap_space_gib()
-    print(f"[worker] CPU swap space: {swap} GiB", flush=True)
+    print(f"[worker] CPU swap space: {swap} GiB (set HELIX_SWAP_SPACE_GB to override)", flush=True)
     engine_args = EngineArgs(model=model_name, block_size=16,
                              load_format="dummy", enforce_eager=True,
                              swap_space=swap, max_num_batched_tokens=4096,
