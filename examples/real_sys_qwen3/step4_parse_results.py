@@ -3,8 +3,9 @@ Summarise a real-system run (latency + decode throughput), reusing examples/real
 
   python step4_parse_results.py ./result/maxflow_offline_ilp/ [--warm-up 60] [--finish 300]
 
-For an offline run it also prints the online --rate to use next (paper setup: 75% of peak,
-expressed in total = prompt + output tokens/s, which is what step2's --rate expects).
+Also prints the exact total (prompt + generated) token throughput counted from the events, so it is
+right for any prompt mix (dataset prompts included), and for an offline run the online --rate to
+use next (paper setup: 75% of peak, in total tokens/s, which is what step2's --rate expects).
 """
 import argparse
 import contextlib
@@ -65,14 +66,23 @@ def main():
     print(buf.getvalue(), end="")
     m = re.search(r"Throughput: ([0-9.]+) Tokens/s", buf.getvalue())
 
+    # exact token accounting from the events (works for any prompt / output length mix, e.g.
+    # dataset prompts): a returned prompt = input_len prompt tokens + its first generated token,
+    # a returned decode = one generated token
+    t0, t1 = a.warm_up, min(a.finish, last_t)
+    span = max(t1 - t0, 1e-9)
+    p_in = [e for e in events if e[2] == "in" and e[3] == "prompt" and t0 <= e[0] <= t1]
+    d_in = [e for e in events if e[2] == "in" and e[3] == "decode" and t0 <= e[0] <= t1]
+    prompt_tokens = sum(e[5] - 1 for e in p_in)
+    generated = len(p_in) + len(d_in)
+    total = (prompt_tokens + generated) / span
+    routes = os.path.join(a.result_dir, "query_route.txt")
+    lens = [eval(x)[1:3] for x in open(routes) if x.strip()] if os.path.exists(routes) else []
+    print(f"Exact, t={t0:g}..{t1:.0f}s: {len(p_in) / span:.2f} requests/s, prompt {prompt_tokens / span:.1f} + "
+          f"generated {generated / span:.1f} = total {total:.1f} tokens/s"
+          + (f"  (requests avg in {sum(x[0] for x in lens) / len(lens):.0f} / out {sum(x[1] for x in lens) / len(lens):.0f})"
+             if lens else ""))
     if m and "offline" in os.path.basename(os.path.normpath(a.result_dir)):
-        # decode tokens/s -> total tokens/s for the Azure-Conversation length distribution
-        from simulator.trace_generator.trace_generator import LengthSampler, Dataset
-        ls = LengthSampler(dataset=Dataset.AzureConversation, seed=0)
-        scale = ls.get_average_length() / ls.average_output_length
-        total = float(m.group(1)) * scale
-        print(f"Total-token throughput ~= {total:.1f} tokens/s (decode x {scale:.2f}; Azure-Conv avg "
-              f"in {ls.average_input_length:.0f} / out {ls.average_output_length:.0f})")
         print(f"Next, online at 75% of peak:  python step2_start_host.py online <method> "
               f"--layout <layout> --rate {0.75 * total:.0f}")
 

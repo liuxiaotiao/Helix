@@ -66,6 +66,10 @@ class PromptSource:
     Must be a pure function of its arguments: the host may ask again for the same qid when the
     scheduler could not place the request the first time."""
     name = "base"
+    once = False        # True: every prompt is used exactly once, then no more requests
+
+    def __len__(self):
+        return 1 << 62
 
     def make(self, qid: int, input_len: int, output_len: int) -> Tuple[List[int], int, int, dict]:
         """-> (prompt token ids, input_len, output_len, extra info saved with the generation)"""
@@ -92,8 +96,9 @@ class FilePromptSource(PromptSource):
     that prompt + output <= max_total."""
     name = "file"
 
-    def __init__(self, path: str, tokenizer, max_input: int = 2048, max_total: int = 4096):
-        self.path = path
+    def __init__(self, path: str, tokenizer, max_input: int = 2048, max_total: int = 4096,
+                 once: bool = False):
+        self.path, self.once = path, once
         self.items = [json.loads(line) for line in open(path) if line.strip()]
         if not self.items:
             raise SystemExit(f"{path}: no prompts")
@@ -122,7 +127,12 @@ class FilePromptSource(PromptSource):
         ids = self._ids(k)
         out = int(self.items[k].get("max_tokens", output_len))
         out = max(1, min(out, self.max_total - len(ids)))
-        return list(ids), len(ids), out, {"prompt_index": k}
+        info = {"prompt_index": k}
+        info.update({key: self.items[k][key] for key in ("dataset", "id") if key in self.items[k]})
+        return list(ids), len(ids), out, info
+
+    def __len__(self):
+        return len(self.items)
 
 
 # ------------------------------------------------------------------------------------------- #
@@ -144,6 +154,14 @@ class TokenIO:
         ids, i, o, info = self.source.make(qid, input_len, output_len)
         self.prompts[qid], self.info[qid] = ids, {**info, "output_len": o}
         return ids, i, o
+
+    def can_launch(self, qid: int) -> bool:
+        """False once a run-each-prompt-once source (--prompts-once) has handed out every prompt"""
+        return not (self.real and self.source.once and qid >= len(self.source))
+
+    def all_done(self, next_qid: int, flying) -> bool:
+        """run-each-prompt-once: every prompt launched and nothing in flight -> the run can stop"""
+        return not self.can_launch(next_qid) and not flying
 
     def on_token(self, qid: int, token: int) -> None:
         """a result came back from the last stage (after the prompt or a decode step)"""
@@ -179,10 +197,17 @@ class TokenIO:
         return path
 
 
-def make_token_io(real: bool, prompts: str, weights_dir: Optional[str], seed: int = 0) -> TokenIO:
-    """prompts: "random" or a path to a JSONL file (see FilePromptSource)."""
+def make_token_io(real: bool, prompts: str, weights_dir: Optional[str], seed: int = 0,
+                  once: bool = False) -> TokenIO:
+    """prompts: "random" or a path to a JSONL file (see FilePromptSource); once: use every prompt
+    of the file exactly once (length calibration, tools/calibrate_lengths.py)."""
     if not real:
         return TokenIO(real=False)
     tok = load_tokenizer(weights_dir)
-    source = RandomPromptSource(seed=seed) if prompts == "random" else FilePromptSource(prompts, tok)
+    if prompts == "random":
+        if once:
+            raise SystemExit("--prompts-once needs a prompt file")
+        source = RandomPromptSource(seed=seed)
+    else:
+        source = FilePromptSource(prompts, tok, once=once)
     return TokenIO(real=True, source=source, tokenizer=tok, eos=eos_ids(weights_dir))

@@ -7,6 +7,7 @@ cluster.json, from this directory:
   python step2_start_host.py offline swarm   --layout swarm            # baselines: swarm | random
   python step2_start_host.py offline maxflow --real                    # real weights, greedy, random prompts
   python step2_start_host.py offline maxflow --real --prompts my_prompts.jsonl
+  python step2_start_host.py offline maxflow --real --prompts prompts/gsm8k.jsonl --prompts-once --duration 7200
 
 --real: workers load the real Qwen3 weights (start them with `cluster_ctl.py start-workers maxflow
 --real`); the host feeds each generated token back into the next decode step and saves prompts,
@@ -74,6 +75,9 @@ def main():
     ap.add_argument("--real", action="store_true", help="real weights / real tokens (workers need --real)")
     ap.add_argument("--prompts", default="random", help='with --real: "random" or a JSONL file of prompts')
     ap.add_argument("--seed", type=int, default=0, help="seed of the random prompts")
+    ap.add_argument("--prompts-once", action="store_true",
+                    help="with a prompt file: send every prompt exactly once, then stop when all are done "
+                         "(length calibration, see tools/calibrate_lengths.py; use a long --duration)")
     ap.add_argument("--init-wait", type=float, default=None,
                     help="seconds to wait after sending the config before the first request (default "
                          "20; with --real the host instead waits until every worker reports Ready)")
@@ -121,7 +125,9 @@ def main():
         weights_dir = os.path.expanduser((c.get("weights") or {}).get("dir") or "") if a.real else None
         if a.real and a.prompts != "random" and not os.path.exists(a.prompts):
             raise SystemExit(f"--prompts {a.prompts}: no such file")
-        token_io = make_token_io(a.real, a.prompts, weights_dir, seed=a.seed)
+        if a.prompts_once and not a.real:
+            raise SystemExit("--prompts-once needs --real")
+        token_io = make_token_io(a.real, a.prompts, weights_dir, seed=a.seed, once=a.prompts_once)
         if a.init_wait is not None:
             init_wait = a.init_wait
         elif a.real:

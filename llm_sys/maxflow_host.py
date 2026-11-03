@@ -165,9 +165,12 @@ def run_maxflow_host_online(
         now = time.time() - ground_zero
         if now > duration + 30:
             break
+        if token_io.all_done(next_query_id, flying_queries_dict):
+            print(f"All {next_query_id} prompts finished (--prompts-once).")
+            break
 
         # send new requests into cluster if needed
-        while not len(trace) == 0 and trace[0][0] <= now:
+        while not len(trace) == 0 and trace[0][0] <= now and token_io.can_launch(next_query_id):
             # the request has a time stamp smaller than now, should be sent
             expected_submit_time, input_length, output_length = trace.pop(0)
 
@@ -369,6 +372,9 @@ def run_maxflow_host_offline(
         now = time.time() - ground_zero
         if now > duration + 1:
             break
+        if token_io.all_done(next_query_id, flying_queries_dict):
+            print(f"All {next_query_id} prompts finished (--prompts-once).")
+            break
 
         # log bottleneck
         if now - last_log_time >= 1:
@@ -376,7 +382,8 @@ def run_maxflow_host_offline(
             print(f"(t={now}) Bottleneck kv usage: {maxflow_scheduler.kv_expectation.bottleneck_usage()}.")
 
         # send out initial requests into the cluster
-        while not len(initial_requests) == 0 and initial_requests[0][0] <= now:
+        while not len(initial_requests) == 0 and initial_requests[0][0] <= now and \
+                token_io.can_launch(next_query_id):
             # the request has a time stamp smaller than now, should be sent
             expected_submit_time, input_length, output_length = initial_requests[0]
 
@@ -441,7 +448,7 @@ def run_maxflow_host_offline(
 
                 # at the end of prompt phase, we have a choice to add more requests if kv cache is ok
                 current_bottleneck = maxflow_scheduler.kv_expectation.bottleneck_usage()
-                if current_bottleneck <= feeding_hwm:
+                if current_bottleneck <= feeding_hwm and token_io.can_launch(next_query_id):
                     # launch a new request
                     # the request has a time stamp smaller than now, should be sent
                     input_length, output_length = length_sampler.sample_length()
@@ -511,7 +518,7 @@ def run_maxflow_host_offline(
 
                 # we have a chance to determine whether we need to add a new request
                 current_bottleneck = maxflow_scheduler.kv_expectation.bottleneck_usage()
-                if current_bottleneck <= feeding_hwm:
+                if current_bottleneck <= feeding_hwm and token_io.can_launch(next_query_id):
                     # launch a new request
                     # the request has a time stamp smaller than now, should be sent
                     input_length, output_length = length_sampler.sample_length()

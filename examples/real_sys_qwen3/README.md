@@ -279,6 +279,33 @@ python step2_start_host.py online maxflow --layout ilp --rate <上一步给出�
 - 真实运行目前只支持 maxflow 调度。
 - 单节点对比真实权重和 dummy 权重的速度、检查 fp16 数值：`python tools/bench_real_weights.py`（在持有第 0 层的节点上运行）。实测前 6 层：两者速度接近，真实权重 decode 快约 5～15%（路由更集中，读的专家更少）。
 
+### 7. 用数据集（GSM8K、MBPP、no_robots）做满载测试
+
+1. 在控制节点上生成 prompt 文件（需要能访问 Hugging Face；默认关闭 Qwen3 的 thinking，`--think` 可打开）：
+   ```bash
+   python ../../tools/make_prompts.py                    # -> prompts/{gsm8k,mbpp,no_robots,mix}.jsonl
+   python ../../tools/make_prompts.py --limit 300        # 每个数据集只取 300 条
+   ```
+   GSM8K 用 test 集（1319 条）并加上 "逐步推理、答案写在 \boxed{} 里"；MBPP 用 full/test（题目 + 测试用例）；no_robots 用 test（多轮对话，截到最后一个用户发言）。`mix.jsonl` 是三者打乱混合。
+2. 标定输出长度：Helix 的每个请求会一直生成到预定长度（worker 只在那时释放 KV cache），不会在 EOS 处停。所以先让每条 prompt 各跑一次，记录 greedy 解码在哪里输出 EOS，再把它写成该 prompt 的 `max_tokens`：
+   ```bash
+   python cluster_ctl.py start-workers maxflow --real
+   python step2_start_host.py offline maxflow --real --prompts prompts/gsm8k.jsonl --prompts-once \
+       --duration 7200 --result-dir result/calib_gsm8k/
+   python ../../tools/calibrate_lengths.py prompts/gsm8k.jsonl result/calib_gsm8k/generations.jsonl
+   #   -> prompts/gsm8k.calibrated.jsonl
+   ```
+   `--prompts-once`：每条 prompt 只发一次，全部完成后 host 自动结束。greedy 解码是确定的，之后用标定后的文件运行，每个请求都会恰好在它自己的 EOS 处结束。
+3. 满载测试（重启 worker 后）：
+   ```bash
+   python step2_start_host.py offline maxflow --real --prompts prompts/gsm8k.calibrated.jsonl \
+       --duration 300 --result-dir result/gsm8k_offline_ilp/
+   python step4_parse_results.py result/gsm8k_offline_ilp/
+   ```
+   step4 的 "Exact" 一行直接从事件统计 prompt 和生成的 token 数，不依赖 Azure 数据集的平均长度，所以对任何数据集都准确；它也给出 online 实验的 `--rate`。
+
+注意：ILP 方案是按 Azure 对话数据集的长度分布（平均输入 750、输出 240）规划的。数据集的输入输出比例不同时（例如 GSM8K 输入短、输出相对长），这个方案未必是最优的，实测吞吐也不能直接和 8029 比。
+
 ## 已知限制
 
 - **默认用 dummy 权重**（和 `llama.py` 一样），真实权重见上面第 6 节。dummy 初始化下 router 的输出接近均匀，各专家负载接近均匀；真实模型的路由更集中。

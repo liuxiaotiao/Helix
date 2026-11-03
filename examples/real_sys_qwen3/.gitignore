@@ -6,3 +6,4 @@ logs/
 *.tgz
 # config/, layouts/, deploy/ and cluster.json are the deployment plan: commit them
 # (plan locally, push to GitHub, git pull on the control node, then cluster_ctl.py push-plan)
+prompts/
