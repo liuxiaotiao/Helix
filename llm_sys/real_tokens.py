@@ -10,9 +10,10 @@ feeds token -1 (the worker then embeds a constant). With TokenIO(real=True) the 
   * writes every request's prompt and generated tokens/text to <result_dir>/generations.jsonl.
 Request lengths keep coming from the workload trace (Azure-Conversation lengths), so the
 scheduler, the KV accounting and the throughput numbers mean the same as in dummy runs; with
-a file source the prompt's real length is used instead. Generation always runs to the planned
-output length (workers free a request's KV cache only there); the saved text is cut at the
-first EOS token.
+a file source the prompt's real length is used instead, its "max_tokens" is the output cap, and
+by default (stop_at_eos) a request ends at its first EOS: the host sends one more decode step
+carrying the shortened length, after which every worker on the path frees the request's KV
+cache. Random prompts run to the trace's output length. The saved text is cut at the first EOS.
 
 TokenIO(real=False) reproduces the original behaviour exactly.
 Only needs the `tokenizers` package (no torch / vLLM).
@@ -138,8 +139,10 @@ class FilePromptSource(PromptSource):
 # ------------------------------------------------------------------------------------------- #
 class TokenIO:
     def __init__(self, real: bool = False, source: Optional[PromptSource] = None, tokenizer=None,
-                 eos: Tuple[int, ...] = DEFAULT_EOS_IDS):
+                 eos: Tuple[int, ...] = DEFAULT_EOS_IDS, stop_at_eos: bool = False):
         self.real = real
+        self.stop_at_eos = real and stop_at_eos
+        self.stopped = set()
         self.source = source if source is not None else RandomPromptSource()
         self.tok = tokenizer
         self.eos = set(eos)
@@ -167,6 +170,13 @@ class TokenIO:
         """a result came back from the last stage (after the prompt or a decode step)"""
         if self.real:
             self.generated.setdefault(qid, []).append(int(token))
+
+    def stops_at(self, qid: int, token: int) -> bool:
+        """True the first time request qid generates an EOS token (with stop_at_eos)"""
+        if self.stop_at_eos and qid not in self.stopped and int(token) in self.eos:
+            self.stopped.add(qid)
+            return True
+        return False
 
     def decode_input(self, qid: int) -> List[int]:
         if not self.real:
@@ -198,7 +208,7 @@ class TokenIO:
 
 
 def make_token_io(real: bool, prompts: str, weights_dir: Optional[str], seed: int = 0,
-                  once: bool = False) -> TokenIO:
+                  once: bool = False, stop_at_eos: Optional[bool] = None) -> TokenIO:
     """prompts: "random" or a path to a JSONL file (see FilePromptSource); once: use every prompt
     of the file exactly once (length calibration, tools/calibrate_lengths.py)."""
     if not real:
@@ -210,4 +220,6 @@ def make_token_io(real: bool, prompts: str, weights_dir: Optional[str], seed: in
         source = RandomPromptSource(seed=seed)
     else:
         source = FilePromptSource(prompts, tok, once=once)
-    return TokenIO(real=True, source=source, tokenizer=tok, eos=eos_ids(weights_dir))
+    if stop_at_eos is None:          # default: stop at EOS for real prompts, not for random ones
+        stop_at_eos = prompts != "random"
+    return TokenIO(real=True, source=source, tokenizer=tok, eos=eos_ids(weights_dir), stop_at_eos=stop_at_eos)

@@ -75,6 +75,9 @@ def main():
     ap.add_argument("--real", action="store_true", help="real weights / real tokens (workers need --real)")
     ap.add_argument("--prompts", default="random", help='with --real: "random" or a JSONL file of prompts')
     ap.add_argument("--seed", type=int, default=0, help="seed of the random prompts")
+    ap.add_argument("--no-stop-at-eos", action="store_true",
+                    help="with a prompt file: generate every request to its max_tokens instead of ending "
+                         "it at its first EOS (the default for prompt files; random prompts never stop early)")
     ap.add_argument("--prompts-once", action="store_true",
                     help="with a prompt file: send every prompt exactly once, then stop when all are done "
                          "(length calibration, see tools/calibrate_lengths.py; use a long --duration)")
@@ -127,7 +130,8 @@ def main():
             raise SystemExit(f"--prompts {a.prompts}: no such file")
         if a.prompts_once and not a.real:
             raise SystemExit("--prompts-once needs --real")
-        token_io = make_token_io(a.real, a.prompts, weights_dir, seed=a.seed, once=a.prompts_once)
+        token_io = make_token_io(a.real, a.prompts, weights_dir, seed=a.seed, once=a.prompts_once,
+                                 stop_at_eos=False if a.no_stop_at_eos else None)
         if a.init_wait is not None:
             init_wait = a.init_wait
         elif a.real:

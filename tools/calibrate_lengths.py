@@ -1,18 +1,17 @@
 """
-Give every prompt its real output length, so offline / online runs with dataset prompts
-generate exactly what the model would, and stop where it stops.
+Oracle output lengths for dataset prompts: write a prompt file whose "max_tokens" is the length
+at which each prompt's greedy generation actually ended (its first EOS).
 
-Helix runs each request to a planned output length (workers free a request's KV cache only
-there) and cannot stop at EOS. So: run every prompt once with a generous cap, see where greedy
-decoding emitted EOS, and write a new prompt file whose "max_tokens" is that length. Greedy
-decoding is deterministic, so later runs generate the same tokens and end at the same EOS.
+Runs with a prompt file already end each request at its first EOS (step2_start_host.py, default;
+llm_sys/real_tokens.py). But the host's scheduler admits requests by their *planned* length, i.e.
+"max_tokens", and reserves KV for it. With this file the planned length is the real one, which
+is the "known output lengths" setting. Greedy decoding is deterministic, so a run with the
+calibrated file generates the same tokens and ends at the same EOS.
 
-    # 1. every prompt once, cap from the file (e.g. 1024)
-    python step2_start_host.py offline maxflow --real --prompts prompts/gsm8k.jsonl \\
-        --prompts-once --duration 7200 --result-dir result/calib_gsm8k/
-    # 2. lengths from that run
-    python ../../tools/calibrate_lengths.py prompts/gsm8k.jsonl result/calib_gsm8k/generations.jsonl
-    #    -> prompts/gsm8k.calibrated.jsonl   (use it for the throughput runs)
+    python step2_start_host.py offline maxflow --real --prompts prompts/mix.jsonl --prompts-once \
+        --duration 3600 --result-dir result/mix_offline_ilp/
+    python ../../tools/calibrate_lengths.py prompts/mix.jsonl result/mix_offline_ilp/generations.jsonl
+    #    -> prompts/mix.calibrated.jsonl
 
 Prompts that did not reach EOS within the cap keep the cap ("hit_cap": true); prompts that did
 not run at all are dropped (--keep-missing keeps them with the cap).

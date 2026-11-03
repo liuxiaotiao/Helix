@@ -142,6 +142,31 @@ def main():
     set_tok(eng, 0, 42, 999)
     ok &= check(seq.data.output_token_ids == [5, 999], "first stage replaces the placeholder with the real token")
 
+    print("stop at EOS")
+    tio = TokenIO(real=True, source=RandomPromptSource(), tokenizer=tok, eos=(7,), stop_at_eos=True)
+    ok &= check(not tio.stops_at(1, 5) and tio.stops_at(1, 7) and not tio.stops_at(1, 7),
+                "host shortens a request once, at its first EOS")
+    ok &= check(not TokenIO(real=True, source=RandomPromptSource(), eos=(7,)).stops_at(1, 7),
+                "off by default (random prompts keep the trace lengths)")
+    src_txt = open(os.path.join(REPO, "llm_sys", "worker.py")).read()
+    ns = {}
+    exec(src_txt[src_txt.index("def _apply_max_tokens"):src_txt.index("def load_real_weights")], ns)
+    apply_max = ns["_apply_max_tokens"]
+    # worker state after the prompt (10 tokens) and 3 decode steps: 4 tokens generated so far
+    sp = types.SimpleNamespace(max_tokens=50)                      # planned: 50 output tokens
+    seq = types.SimpleNamespace(get_prompt_token_ids=lambda: [1] * 10, get_output_len=lambda: 4)
+    grp = types.SimpleNamespace(get_seqs=lambda: [seq], sampling_params=sp)
+    eng = types.SimpleNamespace(scheduler=types.SimpleNamespace(seq_groups={("9", 0): grp}))
+    apply_max(eng, 0, 9, 60)                                       # header = planned length
+    ok &= check(sp.max_tokens == 50, "a decode with the planned length changes nothing")
+    # host saw EOS at processed = 10 + 4 = 14 tokens -> last decode carries max_tokens = 15
+    apply_max(eng, 0, 9, 15)
+    # llm_sys/engine/scheduler.py ends a request when sp.max_tokens <= output_len + 1
+    ok &= check(sp.max_tokens <= seq.get_output_len() + 1,
+                "the shortened decode makes the worker finish (and free) the request after this step")
+    apply_max(eng, 0, 12345, 15)
+    ok &= check(True, "unknown request ids are ignored")
+
     print("ALL REAL-TOKEN TESTS PASSED" if ok else "FAILED")
     sys.exit(0 if ok else 1)
 

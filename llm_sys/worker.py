@@ -75,6 +75,20 @@ def _set_input_token(engine, layer_id: int, request_id: int, token: int) -> None
             seq.data.output_token_ids.append(token)
 
 
+def _apply_max_tokens(engine, layer_id: int, request_id: int, max_tokens: int) -> None:
+    """Decode step whose header carries a smaller max_tokens than planned (the host saw EOS):
+    shrink the request's generation limit so that every node on its path finishes the request,
+    and frees its KV cache, right after this step. The local layers of a request share one
+    SamplingParams object, so updating it at the first local layer covers all of them."""
+    seq_group = engine.scheduler.seq_groups.get((f"{request_id}", layer_id))
+    if seq_group is None:
+        return
+    prompt_len = len(seq_group.get_seqs()[0].get_prompt_token_ids())
+    new_limit = max_tokens - prompt_len
+    if new_limit < seq_group.sampling_params.max_tokens:
+        seq_group.sampling_params.max_tokens = new_limit
+
+
 def load_real_weights(engine, layer_ids, weights_dir: str) -> None:
     from llm_sys.engine.hf_weights import WeightIndex, load_stage_weights
     t0 = time.time()
@@ -222,6 +236,9 @@ def run_worker(scheduling_method: str, model_name: str, vram_usage=0.8, weights_
             else:
                 # print(f"[Decode] Request {request_id} arrives (context_len={num_tokens}, max_len={max_tokens}, "
                 #       f"layers=[{start_layer_idx}, {end_layer_idx}))")
+                if real:
+                    # the host shortens a request that hit EOS (llm_sys/real_tokens.py)
+                    _apply_max_tokens(engine, start_layer_idx, request_id, max_tokens)
                 if is_token:
                     # first layer: no activations; in real mode the host sends the token the
                     # last stage generated in the previous step (-1 = placeholder)

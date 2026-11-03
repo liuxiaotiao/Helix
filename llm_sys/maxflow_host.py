@@ -234,6 +234,13 @@ def run_maxflow_host_online(
                 py_on_the_fly_query.processed_tokens += 1
 
             # then we decide whether to send out new messages (decodes)
+            # EOS (real generation, file prompts): end the request after one more step. That
+            # step's decode carries the shortened length, so every worker on the path finishes
+            # the request and frees its KV cache (llm_sys/worker.py:_apply_max_tokens)
+            if token_io.stops_at(query_uid, generated_token):
+                py_on_the_fly_query.output_length = min(
+                    py_on_the_fly_query.output_length,
+                    py_on_the_fly_query.processed_tokens + 1 - py_on_the_fly_query.input_length)
             max_size = py_on_the_fly_query.input_length + py_on_the_fly_query.output_length
             assert py_on_the_fly_query.processed_tokens <= max_size, "Found request that did not end!"
             if py_on_the_fly_query.processed_tokens == max_size:
@@ -506,6 +513,13 @@ def run_maxflow_host_offline(
                 py_on_the_fly_query.processed_tokens += 1
 
             # then we decide whether to send out new messages (decodes)
+            # EOS (real generation, file prompts): end the request after one more step. That
+            # step's decode carries the shortened length, so every worker on the path finishes
+            # the request and frees its KV cache (llm_sys/worker.py:_apply_max_tokens)
+            if token_io.stops_at(query_uid, generated_token):
+                py_on_the_fly_query.output_length = min(
+                    py_on_the_fly_query.output_length,
+                    py_on_the_fly_query.processed_tokens + 1 - py_on_the_fly_query.input_length)
             max_size = py_on_the_fly_query.input_length + py_on_the_fly_query.output_length
             assert py_on_the_fly_query.processed_tokens <= max_size, "Found request that did not end!"
             if py_on_the_fly_query.processed_tokens == max_size:

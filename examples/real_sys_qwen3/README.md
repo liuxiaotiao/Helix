@@ -287,22 +287,21 @@ python step2_start_host.py online maxflow --layout ilp --rate <上一步给出�
    python ../../tools/make_prompts.py --limit 300        # 每个数据集只取 300 条
    ```
    GSM8K 用 test 集（1319 条）并加上 "逐步推理、答案写在 \boxed{} 里"；MBPP 用 full/test（题目 + 测试用例）；no_robots 用 test（多轮对话，截到最后一个用户发言）。`mix.jsonl` 是三者打乱混合。
-2. 标定输出长度：Helix 的每个请求会一直生成到预定长度（worker 只在那时释放 KV cache），不会在 EOS 处停。所以先让每条 prompt 各跑一次，记录 greedy 解码在哪里输出 EOS，再把它写成该 prompt 的 `max_tokens`：
+2. 满载测试（worker 用 `--real` 启动）：
    ```bash
    python cluster_ctl.py start-workers maxflow --real
-   python step2_start_host.py offline maxflow --real --prompts prompts/gsm8k.jsonl --prompts-once \
-       --duration 7200 --result-dir result/calib_gsm8k/
-   python ../../tools/calibrate_lengths.py prompts/gsm8k.jsonl result/calib_gsm8k/generations.jsonl
-   #   -> prompts/gsm8k.calibrated.jsonl
+   python step2_start_host.py offline maxflow --real --prompts prompts/mix.jsonl --prompts-once \
+       --duration 3600 --result-dir result/mix_offline_ilp/
+   python step4_parse_results.py result/mix_offline_ilp/ --warm-up 0 --finish 100000
    ```
-   `--prompts-once`：每条 prompt 只发一次，全部完成后 host 自动结束。greedy 解码是确定的，之后用标定后的文件运行，每个请求都会恰好在它自己的 EOS 处结束。
-3. 满载测试（重启 worker 后）：
+   - 用 prompt 文件时，请求默认**在第一个 EOS 处结束**：host 收到 EOS 后再发最后一步 decode，消息里带着缩短后的长度，路径上每个 worker 算完这一步就结束这个请求、释放 KV cache（多算一步，可忽略）。`max_tokens` 只是上限。`--no-stop-at-eos` 可关掉（一直生成到 `max_tokens`）。随机 prompt 不提前结束，仍按 Azure 长度分布。
+   - `--prompts-once`：每条 prompt 只发一次，全部完成后 host 自动结束，测的是"处理完这一批请求"的表现；去掉它并设 `--duration 300`，则循环使用 prompt 测稳态吞吐。
+   - step4 的 "Exact" 一行直接从事件统计 prompt 和生成的 token 数，不依赖 Azure 数据集的平均长度，所以对任何数据集都准确；它也给出 online 实验的 `--rate`。
+3. （可选）标定输出长度：host 的调度器在接纳请求时按 `max_tokens` 预留 KV，看不到真实长度。想让调度器事先知道每个请求的真实长度（"已知长度"的理想情况），先用上一步的结果生成标定文件，再用它运行：
    ```bash
-   python step2_start_host.py offline maxflow --real --prompts prompts/gsm8k.calibrated.jsonl \
-       --duration 300 --result-dir result/gsm8k_offline_ilp/
-   python step4_parse_results.py result/gsm8k_offline_ilp/
+   python ../../tools/calibrate_lengths.py prompts/mix.jsonl result/mix_offline_ilp/generations.jsonl
+   #   -> prompts/mix.calibrated.jsonl（max_tokens = 每条 prompt 自然结束的长度）
    ```
-   step4 的 "Exact" 一行直接从事件统计 prompt 和生成的 token 数，不依赖 Azure 数据集的平均长度，所以对任何数据集都准确；它也给出 online 实验的 `--rate`。
 
 注意：ILP 方案是按 Azure 对话数据集的长度分布（平均输入 750、输出 240）规划的。数据集的输入输出比例不同时（例如 GSM8K 输入短、输出相对长），这个方案未必是最优的，实测吞吐也不能直接和 8029 比。
 
