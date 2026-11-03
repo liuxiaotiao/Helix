@@ -251,6 +251,12 @@ python step2_start_host.py online maxflow --layout ilp --rate <上一步给出�
 
 `result/<方法>_<模式>_<布局>/query_route.txt` 里记录了每个请求实际走的路径。
 
+最后一张 "Metrics" 表（同时存成结果目录下的 `summary.csv` / `summary.json`），只统计测量窗口（`--warm-up` 到 `--finish`）内的数据：
+
+- 每请求指标（均值、p50、p99；只算窗口内完成的请求）：E2E、TTFT、TPOT、输出长度、每请求 tok/s、Decode tok/s（= 1000/TPOT）。延迟从 host 把 prompt 发进集群的时刻算起。Helix 的 host 没有自己的排队（online 到达即发送，offline 发送时才生成请求），所以这些延迟不含进入集群前的排队，即 "excl. queue"；请求在集群内 GPU 上等待其他 batch 的时间包含在内，从事件里无法单独分离。
+- 吞吐：输出 tok/s、含 prompt 的 tok/s、requests/min、输出 token 总数。
+- GPU：`step2_start_host.py` 运行期间每秒在每个 worker 上记录一次 `nvidia-smi`（利用率、显存、功率），结束时收集到 `result/.../gpu/<ip>.csv`。表里给出各卡平均利用率的均值、峰值显存之和、总显存之和、各卡平均功率之和，并列出每张卡的数值。加 `--no-gpu-monitor` 可关闭记录。各节点的时钟需要同步（NTP），否则窗口会错位。
+
 ### 6. 用真实权重运行（可选）
 
 默认的 dummy 权重只用于测性能，生成的 token 没有意义。用真实权重运行时，worker 加载各自那几层的 HuggingFace 权重，最后一级用 greedy 采样出真实 token，host 再把它送回第一级作为下一步的输入，并把生成结果保存下来。

@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 REPO = os.path.abspath(os.path.join(HERE, "..", ".."))
@@ -75,6 +76,9 @@ def main():
     ap.add_argument("--real", action="store_true", help="real weights / real tokens (workers need --real)")
     ap.add_argument("--prompts", default="random", help='with --real: "random" or a JSONL file of prompts')
     ap.add_argument("--seed", type=int, default=0, help="seed of the random prompts")
+    ap.add_argument("--no-gpu-monitor", action="store_true",
+                    help="do not sample the workers' GPU utilization / memory / power during the run "
+                         "(saved in <result dir>/gpu/<ip>.csv, summarised by step4_parse_results.py)")
     ap.add_argument("--no-stop-at-eos", action="store_true",
                     help="with a prompt file: generate every request to its max_tokens instead of ending "
                          "it at its first EOS (the default for prompt files; random prompts never stop early)")
@@ -120,47 +124,58 @@ def main():
 
     # import only now: llm_sys.utils reads HELIX_* at import time
     from simulator.event_simulator.cluster_simulator import ModelName
-    if a.real and a.method != "maxflow":
-        raise SystemExit("--real is implemented for maxflow scheduling only")
-    if a.method == "maxflow":
-        from llm_sys.maxflow_host import run_maxflow_host_online, run_maxflow_host_offline
-        from llm_sys.real_tokens import make_token_io
-        weights_dir = os.path.expanduser((c.get("weights") or {}).get("dir") or "") if a.real else None
-        if a.real and a.prompts != "random" and not os.path.exists(a.prompts):
-            raise SystemExit(f"--prompts {a.prompts}: no such file")
-        if a.prompts_once and not a.real:
-            raise SystemExit("--prompts-once needs --real")
-        token_io = make_token_io(a.real, a.prompts, weights_dir, seed=a.seed, once=a.prompts_once,
-                                 stop_at_eos=False if a.no_stop_at_eos else None)
-        if a.init_wait is not None:
-            init_wait = a.init_wait
-        elif a.real:
-            init_wait = lambda: wait_for_workers(c, a.ready_timeout)  # noqa: E731
+    # per-node GPU utilization / memory / power during the run, for step4_parse_results.py
+    gm_tag = None
+    if not a.no_gpu_monitor:
+        from cluster_ctl import Remote, gpumon_start
+        gm_tag = f"{os.path.basename(os.path.normpath(result_dir))}_{int(time.time())}"
+        gpumon_start(c, Remote(c), gm_tag)
+    try:
+        if a.real and a.method != "maxflow":
+            raise SystemExit("--real is implemented for maxflow scheduling only")
+        if a.method == "maxflow":
+            from llm_sys.maxflow_host import run_maxflow_host_online, run_maxflow_host_offline
+            from llm_sys.real_tokens import make_token_io
+            weights_dir = os.path.expanduser((c.get("weights") or {}).get("dir") or "") if a.real else None
+            if a.real and a.prompts != "random" and not os.path.exists(a.prompts):
+                raise SystemExit(f"--prompts {a.prompts}: no such file")
+            if a.prompts_once and not a.real:
+                raise SystemExit("--prompts-once needs --real")
+            token_io = make_token_io(a.real, a.prompts, weights_dir, seed=a.seed, once=a.prompts_once,
+                                     stop_at_eos=False if a.no_stop_at_eos else None)
+            if a.init_wait is not None:
+                init_wait = a.init_wait
+            elif a.real:
+                init_wait = lambda: wait_for_workers(c, a.ready_timeout)  # noqa: E731
+            else:
+                init_wait = 20
+            if a.real:
+                print(f"[host] REAL generation: greedy, prompts={a.prompts}, tokenizer {weights_dir}", flush=True)
+            common = dict(machine_num_dict=hc.machine_num_dict(c), model_name=ModelName.Qwen3_30B_A3B,
+                          complete_cluster_file_name=hc.CLUSTER_INI,
+                          machine_profile_name=hc.MACHINE_PROFILE_INI,
+                          solution_file_name=os.path.join(lay, f"{a.layout}_sol.ini"),
+                          simulator_cluster_file_name=os.path.join(lay, "simulator_cluster.ini"),
+                          real_sys_config_file_name=cfg, duration=a.duration,
+                          result_logging_dir=result_dir, token_io=token_io, init_wait=init_wait)
+            if a.mode == "offline":
+                run_maxflow_host_offline(initial_launch_num=a.initial_launch or 20, feeding_hwm=0.8, **common)
+            else:
+                run_maxflow_host_online(avg_throughput=a.rate, **common)
         else:
-            init_wait = 20
-        if a.real:
-            print(f"[host] REAL generation: greedy, prompts={a.prompts}, tokenizer {weights_dir}", flush=True)
-        common = dict(machine_num_dict=hc.machine_num_dict(c), model_name=ModelName.Qwen3_30B_A3B,
-                      complete_cluster_file_name=hc.CLUSTER_INI,
-                      machine_profile_name=hc.MACHINE_PROFILE_INI,
-                      solution_file_name=os.path.join(lay, f"{a.layout}_sol.ini"),
-                      simulator_cluster_file_name=os.path.join(lay, "simulator_cluster.ini"),
-                      real_sys_config_file_name=cfg, duration=a.duration,
-                      result_logging_dir=result_dir, token_io=token_io, init_wait=init_wait)
-        if a.mode == "offline":
-            run_maxflow_host_offline(initial_launch_num=a.initial_launch or 20, feeding_hwm=0.8, **common)
-        else:
-            run_maxflow_host_online(avg_throughput=a.rate, **common)
-    else:
-        from llm_sys.heuristic_host import run_heuristic_host_online, run_heuristic_host_offline
-        if a.mode == "offline":
-            run_heuristic_host_offline(scheduler_name=a.method, real_sys_config_file_name=cfg,
-                                       initial_launch_num=a.initial_launch or 50, duration=a.duration,
-                                       result_logging_dir=result_dir)
-        else:
-            run_heuristic_host_online(scheduler_name=a.method, real_sys_config_file_name=cfg,
-                                      avg_throughput=a.rate, duration=a.duration,
-                                      result_logging_dir=result_dir)
+            from llm_sys.heuristic_host import run_heuristic_host_online, run_heuristic_host_offline
+            if a.mode == "offline":
+                run_heuristic_host_offline(scheduler_name=a.method, real_sys_config_file_name=cfg,
+                                           initial_launch_num=a.initial_launch or 50, duration=a.duration,
+                                           result_logging_dir=result_dir)
+            else:
+                run_heuristic_host_online(scheduler_name=a.method, real_sys_config_file_name=cfg,
+                                          avg_throughput=a.rate, duration=a.duration,
+                                          result_logging_dir=result_dir)
+    finally:
+        if gm_tag:
+            from cluster_ctl import Remote, gpumon_stop
+            gpumon_stop(c, Remote(c), gm_tag, os.path.join(result_dir, "gpu"))
     print(f"[host] done; logs in {result_dir} -> python step4_parse_results.py {result_dir}", flush=True)
     # the C++ network threads are detached and still blocked in ZeroMQ calls; a normal interpreter
     # exit tears the ZeroMQ context down under them and aborts. Results are written: leave now.

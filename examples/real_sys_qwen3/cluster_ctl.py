@@ -582,6 +582,44 @@ def cmd_disk(c, rm, only, quick):
     print(f"\n每台的完整报告（含具体路径和清理命令）: {os.path.relpath(LOG_DIR, HERE)}/disk_<ip>.txt")
 
 
+GPUMON_DIR = "$HOME/.helix/gpumon"
+
+
+def gpumon_start(c, rm, tag, interval=1.0):
+    """Sample every worker's GPU (utilization %, memory used / total MiB, power W) every `interval`
+    seconds in the background, with the node's epoch time, until gpumon_stop(tag)."""
+    started = []
+    for w in c["workers"]:
+        idx = int(w.get("gpu", 0))
+        loop = (f": helix_gpumon_{tag}; while :; do t=$(date +%s.%N); "
+                f"s=$(nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,power.draw "
+                f"--format=csv,noheader,nounits -i {idx} 2>/dev/null | head -1); "
+                f"echo \"$t, $s\"; sleep {interval}; done")
+        cmd = (f"mkdir -p {GPUMON_DIR} && {{ setsid nohup bash -c {shlex.quote(loop)} "
+               f"> {GPUMON_DIR}/{tag}_{w['ip']}.csv 2>/dev/null < /dev/null & }} && echo started")
+        r = rm.run(w["ip"], cmd, setup=False, timeout=30)
+        if "started" in r.stdout:
+            started.append(w["ip"])
+        else:
+            print(f"[gpu-monitor] {w['ip']}: could not start: {(r.stderr or r.stdout).strip()[-200:]}")
+    print(f"[gpu-monitor] sampling {len(started)} GPU(s) every {interval:g}s (tag {tag})", flush=True)
+    return started
+
+
+def gpumon_stop(c, rm, tag, dest_dir):
+    """Stop the samplers of gpumon_start(tag) and copy their CSVs to dest_dir/<ip>.csv."""
+    os.makedirs(dest_dir, exist_ok=True)
+    n = 0
+    for w in c["workers"]:
+        f = f"{GPUMON_DIR}/{tag}_{w['ip']}.csv"
+        r = rm.run(w["ip"], f"pkill -f '[h]elix_gpumon_{tag}'; cat {f} 2>/dev/null; rm -f {f}; true",
+                   setup=False, timeout=60)
+        with open(os.path.join(dest_dir, f"{w['ip']}.csv"), "w") as out:
+            out.write(r.stdout)
+        n += bool(r.stdout.strip())
+    print(f"[gpu-monitor] {n} GPU log(s) in {dest_dir}", flush=True)
+
+
 def cmd_gpus(c, rm):
     print(f"{'node':15s} {'type':9s} {'GPU':22s} {'used / total':>14s}  processes")
     free = 0

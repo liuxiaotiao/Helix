@@ -41,6 +41,7 @@ def run_heuristic_host_online(
     print("[Python] Cluster initialization finished!")
     # -------------------------------------------------------------------------------------- #
     ground_zero = time.time()
+    llm_sys.utils.write_run_info(result_logging_dir, ground_zero)   # t=0 of events.txt
     next_query_id = 0
     flying_queries_dict = {}
     # -----  log items ----- #
@@ -192,6 +193,7 @@ def run_heuristic_host_offline(
     print("[Python] Cluster initialization finished!")
     # -------------------------------------------------------------------------------------- #
     ground_zero = time.time()
+    llm_sys.utils.write_run_info(result_logging_dir, ground_zero)   # t=0 of events.txt
     next_query_id = 0
     flying_queries_dict = {}
     # -----  log items ----- #

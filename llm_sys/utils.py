@@ -75,3 +75,12 @@ class FlyingQuery:
         self.end_layers = end_layers
         # List[PipelineStage]
         self.pipeline = pipeline
+
+
+def write_run_info(result_dir: str, ground_zero: float) -> None:
+    """Wall-clock time (time.time()) of t=0 in events.txt, so per-node samples taken during the
+    run (examples/real_sys_qwen3: GPU utilization / memory / power) can be lined up with it."""
+    import json
+    import socket
+    with open(os.path.join(result_dir, "run_info.json"), "w") as f:
+        json.dump({"ground_zero": ground_zero, "host": socket.gethostname()}, f)
